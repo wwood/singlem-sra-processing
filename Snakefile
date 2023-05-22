@@ -13,10 +13,14 @@
 # HOST_OR_NOT_PREDICTION_GZ: '/home/woodcrob/m/big_data_microbiome/9_organism_prediction_r207/output_mach2/host_or_not_prediction/host_or_not_preds.csv.gz'
 
 gdtb_version = '08-RS214'
-renewed_output_base_directory = '~/m/msingle/mess/126_r214_renew_of_sra/renew_outputs'
-base_output_directory = '20230519'
-prefix = f'sra_20211215.{gdtb_version}.mach1-'
-acc_organism = '/home/woodcrob/m/big_data_microbiome/9_organism_prediction_r207/acc_organism.csv'
+renewed_output_base_directory = '/work/microbiome/msingle/mess/126_r214_renew_of_sra/renew_outputs'
+base_output_directory = '/work/microbiome/msingle/mess/126_r214_renew_of_sra/processing_20230519'
+predictor_prefix = f'sra_20211215.{gdtb_version}.mach1-'
+acc_organism = '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/acc_organism.csv'
+taxonomy_json = '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/sra_taxonomy_table_20220208_sandpiper_5samples_mach3.json'
+
+tested_depth_indices = [2,3,4] # test phylum class order
+predictor_chosen_taxonomy_depth_index = 2 # i.e. phylum
 
 singlem_base_directory = '~/git/singlem'
 singlem_bin = f'{singlem_base_directory}/bin/singlem'
@@ -24,6 +28,13 @@ singlem_bin = f'{singlem_base_directory}/bin/singlem'
 ## Output paths
 condensed_table = os.path.join(base_output_directory, 'condensed.csv.gz')
 condensed_filled_table = os.path.join(base_output_directory, 'condensed.filled.csv.gz')
+
+rule all:
+    input:
+        [f'{base_output_directory}/logs/host_or_not_prediction-level{depth_index}.log' for depth_index in tested_depth_indices],
+        '{}/host_or_not_prediction/apply_predictor/done'.format(base_output_directory),
+        condensed_filled_table
+
 
 rule generate_condensed_otu_table:
     output:
@@ -34,7 +45,7 @@ rule generate_condensed_otu_table:
         "singlem-dev"
     shell:
         "find {renewed_output_base_directory} -name '*condensed.csv' > {output.condensed_table_list} && " \
-        "cat <(head -1 `head -1 {output.condensed_table_list}) <(cat {output.condensed_otu_table_list} |parallel --ungroup -j1 tail -n+2 {{}}) |pigz >{output.condensed_table} && " \
+        "cat <(head -1 `head -1 {output.condensed_table_list}`) <(cat {output.condensed_table_list} |parallel --ungroup --eta -j1 tail -n+2 {{}}) |pigz >{output.condensed_table} && " \
         "touch {output.done}"
 
 rule fill_condensed_otu_table:
@@ -56,39 +67,42 @@ rule generate_taxonomy_level_profiles_from_condensed_for_predictor:
         done = os.path.join(base_output_directory, 'condensed.done'),
         # '{}'.format(config['INPUT_CONDENSED_PROFILE'])
     output:
-        condensed_profile='{}/generate_profiles_from_condensed/{}2.csv.gz'.format(base_output_directory, prefix),
+        condensed_profile='{}/generate_profiles_from_condensed/{}{}.csv.gz'.format(base_output_directory, predictor_prefix, predictor_chosen_taxonomy_depth_index),
         done='{}/generate_profiles_from_condensed/done'.format(base_output_directory)
     conda:
         'envs/host_or_not_prediction.yml'
     shell:
-        'PYTHONPATH={singlem_base_directory} ./bin/generate_profiles_from_condensed --condensed-otu-table <(zcat {input.condensed_table}) --output-prefix {base_output_directory}/generate_profiles_from_condensed/{config[PREFIX]} && ' \
-        'pigz {base_output_directory}/generate_profiles_from_condensed/{prefix}*.csv && ' \
+        'PYTHONPATH={singlem_base_directory} ./bin/generate_profiles_from_condensed --depth-index-target 2 3 4 --condensed-otu-table <(zcat {input.condensed_table}) --output-prefix {base_output_directory}/generate_profiles_from_condensed/{predictor_prefix} && ' \
+        'pigz {base_output_directory}/generate_profiles_from_condensed/{predictor_prefix}*.csv && ' \
         'touch {output.done}'
 
 rule generate_predictor:
     input:
-        condensed_profile='{}/generate_profiles_from_condensed/{}2.csv.gz'.format(base_output_directory, prefix),
+        condensed_profile='{}/generate_profiles_from_condensed/{}'.format(base_output_directory, predictor_prefix)+'{depth_index}.csv.gz',
         done='{}/generate_profiles_from_condensed/done'.format(base_output_directory)
     output:
-        done='{}/host_or_not_prediction/done'.format(base_output_directory),
-        joblib='{}/host_or_not_prediction/host_or_not.joblib'.format(base_output_directory),
-        column_names='{}/host_or_not_prediction/host_or_not_column_names.csv'.format(base_output_directory)
+        done='{}/host_or_not_prediction/done'.format(base_output_directory)+'{depth_index}',
+        joblib='{}/host_or_not_prediction/host_or_not-'.format(base_output_directory)+'{depth_index}.joblib',
+        column_names='{}/host_or_not_prediction/host_or_not_column_names'.format(base_output_directory) + '{depth_index}.csv',
+        log='{}/logs/host_or_not_prediction-level'.format(base_output_directory)+'{depth_index}.log',
     conda:
         'envs/host_or_not_prediction.yml'
+    threads:
+        64
     shell:
-        './bin/generate_predictor --input-gz-profile {input.condensed_profile} --acc-organism-csv {acc_organism} --sra-taxonomy-table {config[TAXONOMY_JSON]} --output-joblib {output.joblib} --output-column-names {output.column_names} && ' \
+        './bin/generate_predictor --input-gz-profile {input.condensed_profile} --acc-organism-csv {acc_organism} --sra-taxonomy-table {taxonomy_json} --output-joblib {output.joblib} --output-column-names {output.column_names} &> {output.log} && ' \
         'touch {output.done}'
 
 rule apply_predictor:
     input:
-        joblib='{}/host_or_not_prediction/host_or_not.joblib'.format(base_output_directory),
-        column_names='{}/host_or_not_prediction/host_or_not_column_names.csv'.format(base_output_directory),
-        condensed_profile='{}/generate_profiles_from_condensed/{}2.csv.gz'.format(base_output_directory, prefix)
+        joblib='{}/host_or_not_prediction/host_or_not-'.format(base_output_directory)+f'{predictor_chosen_taxonomy_depth_index}.joblib',
+        column_names='{}/host_or_not_prediction/host_or_not_column_names'.format(base_output_directory) + f'{predictor_chosen_taxonomy_depth_index}.csv',
+        condensed_profile='{}/generate_profiles_from_condensed/{}{}.csv.gz'.format(base_output_directory, predictor_prefix, predictor_chosen_taxonomy_depth_index)
     output:
         preds='{}/host_or_not_prediction/host_or_not_preds.csv'.format(base_output_directory),
         done='{}/host_or_not_prediction/apply_predictor/done'.format(base_output_directory)
     conda:
         'envs/host_or_not_prediction.yml'
     shell:
-        './bin/predict_host_or_not --model {input.joblib} --columns-file {input.column_names} --acc-organism-csv {acc_organism} --condensed-profiles {input.condensed_profile} --output {output.preds} && ' \
+        './bin/predict_host_or_not --taxonomy-json {taxonomy_json} --model {input.joblib} --columns-file {input.column_names} --acc-organism-csv {acc_organism} --condensed-profiles {input.condensed_profile} --output {output.preds} && ' \
         'touch {output.done}'
