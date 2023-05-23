@@ -14,13 +14,13 @@
 
 gdtb_version = '08-RS214'
 renewed_output_base_directory = '/work/microbiome/msingle/mess/126_r214_renew_of_sra/renew_outputs'
-base_output_directory = '/work/microbiome/msingle/mess/126_r214_renew_of_sra/processing_20230519'
+base_output_directory = '/work/microbiome/msingle/mess/126_r214_renew_of_sra/processing_20230523'
 predictor_prefix = f'sra_20211215.{gdtb_version}.mach1-'
 acc_organism = '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/acc_organism.csv'
 taxonomy_json = '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/sra_taxonomy_table_20220208_sandpiper_5samples_mach3.json'
 
 tested_depth_indices = [2,3,4] # test phylum class order
-predictor_chosen_taxonomy_depth_index = 2 # i.e. phylum
+predictor_chosen_taxonomy_depth_index = 4
 
 singlem_base_directory = '~/git/singlem'
 singlem_bin = f'{singlem_base_directory}/bin/singlem'
@@ -28,13 +28,27 @@ singlem_bin = f'{singlem_base_directory}/bin/singlem'
 ## Output paths
 condensed_table = os.path.join(base_output_directory, 'condensed.csv.gz')
 condensed_filled_table = os.path.join(base_output_directory, 'condensed.filled.csv.gz')
+otu_table = os.path.join(base_output_directory, 'otu_table.csv.gz')
 
 rule all:
     input:
         [f'{base_output_directory}/logs/host_or_not_prediction-level{depth_index}.log' for depth_index in tested_depth_indices],
         '{}/host_or_not_prediction/apply_predictor/done'.format(base_output_directory),
-        condensed_filled_table
+        condensed_filled_table,
+        otu_table,
 
+rule generate_actual_otu_table:
+    # Remove off-target sequences, but otherwise
+    output:
+        otu_table = otu_table,
+        done = os.path.join(base_output_directory, 'otu_table.done'),
+    conda:
+        "singlem-dev"
+    shell:
+        "rm -f {log} && find {renewed_output_base_directory} -name '*json' " \
+        "|parallel -j20 --eta -N 50 {singlem_base_directory}/bin/singlem summarise --input-archive-otu-table {{}} --exclude-off-target-hits --output-otu-table /dev/stdout --quiet" \
+        "|pigz >{output.otu_table} && " \
+        "touch {output.done}"
 
 rule generate_condensed_otu_table:
     output:
@@ -67,12 +81,16 @@ rule generate_taxonomy_level_profiles_from_condensed_for_predictor:
         done = os.path.join(base_output_directory, 'condensed.done'),
         # '{}'.format(config['INPUT_CONDENSED_PROFILE'])
     output:
-        condensed_profile='{}/generate_profiles_from_condensed/{}{}.csv.gz'.format(base_output_directory, predictor_prefix, predictor_chosen_taxonomy_depth_index),
+        condensed_profile=[
+            '{}/generate_profiles_from_condensed/{}{}.csv.gz'.format(base_output_directory, predictor_prefix, i)
+            for i in tested_depth_indices],
         done='{}/generate_profiles_from_condensed/done'.format(base_output_directory)
     conda:
         'envs/host_or_not_prediction.yml'
+    params:
+        tested_index_string = ' '.join([str(i) for i in tested_depth_indices]),
     shell:
-        'PYTHONPATH={singlem_base_directory} ./bin/generate_profiles_from_condensed --depth-index-target 2 3 4 --condensed-otu-table <(zcat {input.condensed_table}) --output-prefix {base_output_directory}/generate_profiles_from_condensed/{predictor_prefix} && ' \
+        'PYTHONPATH={singlem_base_directory} ./bin/generate_profiles_from_condensed --depth-index-target {params.tested_index_string} --condensed-otu-table <(zcat {input.condensed_table}) --output-prefix {base_output_directory}/generate_profiles_from_condensed/{predictor_prefix} && ' \
         'pigz {base_output_directory}/generate_profiles_from_condensed/{predictor_prefix}*.csv && ' \
         'touch {output.done}'
 
