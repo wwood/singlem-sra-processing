@@ -13,9 +13,9 @@
 # HOST_OR_NOT_PREDICTION_GZ: '/home/woodcrob/m/big_data_microbiome/9_organism_prediction_r207/output_mach2/host_or_not_prediction/host_or_not_preds.csv.gz'
 
 gdtb_version = '08-RS214'
-renewed_output_base_directory = '/work/microbiome/msingle/mess/126_r214_renew_of_sra/renew_outputs'
-base_output_directory = '/work/microbiome/msingle/mess/126_r214_renew_of_sra/processing_20230523'
-predictor_prefix = f'sra_20211215.{gdtb_version}.mach1-'
+renewed_output_base_directory = '/work/microbiome/msingle/mess/135_r214_singlem0.15_renew_of_sra/renew_outputs'
+base_output_directory = '/work/microbiome/msingle/mess/135_r214_singlem0.15_renew_of_sra/processing_20231016'
+predictor_prefix = f'sra_20211215.{gdtb_version}.mach2-'
 acc_organism = '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/acc_organism.csv'
 taxonomy_json = '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/sra_taxonomy_table_20220208_sandpiper_5samples_mach3.json'
 
@@ -46,8 +46,8 @@ rule generate_actual_otu_table:
         "singlem-dev"
     shell:
         "rm -f {log} && find {renewed_output_base_directory} -name '*json' " \
-        "|parallel -j20 --eta -N 50 {singlem_base_directory}/bin/singlem summarise --input-archive-otu-table {{}} --exclude-off-target-hits --output-otu-table /dev/stdout --quiet" \
-        "|pigz >{output.otu_table} && " \
+        "|parallel -j20 --eta -N 50 {singlem_base_directory}/bin/singlem summarise --input-archive-otu-table {{}} --exclude-off-target-hits --output-otu-table /dev/stdout --quiet '|' tail -n+2" \
+        "|cat otu_table_headings - |pigz >{output.otu_table} && " \
         "touch {output.done}"
 
 rule generate_condensed_otu_table:
