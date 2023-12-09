@@ -13,11 +13,13 @@
 # HOST_OR_NOT_PREDICTION_GZ: '/home/woodcrob/m/big_data_microbiome/9_organism_prediction_r207/output_mach2/host_or_not_prediction/host_or_not_preds.csv.gz'
 
 gdtb_version = '08-RS214'
-renewed_output_base_directory = '/work/microbiome/msingle/mess/135_r214_singlem0.15_renew_of_sra/renew_outputs'
-base_output_directory = '/work/microbiome/msingle/mess/135_r214_singlem0.15_renew_of_sra/processing_20231016'
+renewed_output_base_directory = '/work/microbiome/msingle/mess/141_sra_renew_singlem_0.17_approx/renew_outputs'
+base_output_directory = '/work/microbiome/msingle/mess/141_sra_renew_singlem_0.17_approx/processing_20231016'
 predictor_prefix = f'sra_20211215.{gdtb_version}.mach2-'
 acc_organism = '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/acc_organism.csv'
 taxonomy_json = '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/sra_taxonomy_table_20220208_sandpiper_5samples_mach3.json'
+sra_num_bases = '/work/microbiome/msingle/mess/117_read_fraction_of_sra/sra_20211215.num_bases'
+
 
 tested_depth_indices = [2,3,4] # test phylum class order
 predictor_chosen_taxonomy_depth_index = 4
@@ -29,6 +31,10 @@ singlem_bin = f'{singlem_base_directory}/bin/singlem'
 condensed_table = os.path.join(base_output_directory, 'condensed.csv.gz')
 condensed_filled_table = os.path.join(base_output_directory, 'condensed.filled.csv.gz')
 otu_table = os.path.join(base_output_directory, 'otu_table.csv.gz')
+microbial_fractions = os.path.join(base_output_directory, 'microbial_fractions.csv')
+
+# mkdir '{}/logs'.format(base_output_directory)
+os.makedirs('{}/logs'.format(base_output_directory), exist_ok=True)
 
 rule all:
     input:
@@ -36,6 +42,7 @@ rule all:
         '{}/host_or_not_prediction/apply_predictor/done'.format(base_output_directory),
         condensed_filled_table,
         otu_table,
+        microbial_fractions,
 
 rule generate_actual_otu_table:
     # Remove off-target sequences, but otherwise
@@ -124,3 +131,19 @@ rule apply_predictor:
     shell:
         './bin/predict_host_or_not --taxonomy-json {taxonomy_json} --model {input.joblib} --columns-file {input.column_names} --acc-organism-csv {acc_organism} --condensed-profiles {input.condensed_profile} --output {output.preds} && ' \
         'touch {output.done}'
+
+rule microbial_fraction:
+    input:
+        condensed_profile=condensed_table,
+    output:
+        fractions = microbial_fractions,
+        done = touch('{}/done/microbial_fractions.done'.format(base_output_directory))
+    conda:
+        'singlem-dev'
+    params:
+        singlem_bin = singlem_bin,
+        sra_num_bases = sra_num_bases
+    log:
+        '{}/logs/microbial_fractions.log'.format(base_output_directory)
+    shell:
+        '{params.singlem_bin} microbial_fraction -p <(zcat {input.condensed_profile}) --input-metagenome-sizes {params.sra_num_bases} >{output.fractions} --accept-missing-samples 2> {log}'
