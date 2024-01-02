@@ -13,9 +13,9 @@
 # HOST_OR_NOT_PREDICTION_GZ: '/home/woodcrob/m/big_data_microbiome/9_organism_prediction_r207/output_mach2/host_or_not_prediction/host_or_not_preds.csv.gz'
 
 gdtb_version = '08-RS214'
-renewed_output_base_directory = '/work/microbiome/msingle/mess/141_sra_renew_singlem_0.17_approx/renew_outputs'
-base_output_directory = '/work/microbiome/msingle/mess/141_sra_renew_singlem_0.17_approx/processing_20231016'
-predictor_prefix = f'sra_20211215.{gdtb_version}.mach2-'
+renewed_output_base_directory = '/work/microbiome/msingle/mess/145_supplemented_renew/renew_outputs'
+base_output_directory = '/work/microbiome/msingle/mess/145_supplemented_renew/processing_20231210'
+predictor_prefix = f'sra_20211215.{gdtb_version}.supplemented-'
 acc_organism = '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/acc_organism.csv'
 taxonomy_json = '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/sra_taxonomy_table_20220208_sandpiper_5samples_mach3.json'
 sra_num_bases = '/work/microbiome/msingle/mess/117_read_fraction_of_sra/sra_20211215.num_bases'
