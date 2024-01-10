@@ -11,6 +11,13 @@ FROM mambaorg/micromamba:1.5.6
 # This dockerfile uses cached mounts, so to build use e.g.
 # singlem-wdl-local/dockers/singlem$ DOCKER_BUILDKIT=1 docker build .
 
+ARG MAMBA_USER=root
+ARG MAMBA_USER_ID=0
+ARG MAMBA_USER_GID=0
+ENV MAMBA_USER=$MAMBA_USER
+USER root
+RUN echo root > "/etc/arg_mamba_user"
+
 # Don't need all of the dependencies of singlem, because only pipe is going to be run.
 COPY --chown=$MAMBA_USER:$MAMBA_USER env.yaml /tmp/env.yaml
 RUN micromamba install -y -n base -f /tmp/env.yaml && \
@@ -86,9 +93,13 @@ USER root
 # if your image defaults to a non-root user, then you may want to make the
 # next 3 ARG commands match the values in your image. You can get the values
 # by running: docker run --rm -it my/image id -a
-ARG MAMBA_USER=mambauser
-ARG MAMBA_USER_ID=57439
-ARG MAMBA_USER_GID=57439
+# ARG MAMBA_USER=mambauser
+# ARG MAMBA_USER_ID=57439
+# ARG MAMBA_USER_GID=57439
+## Make the default user root because otherwise there are permission issues in google batch
+ARG MAMBA_USER=root
+ARG MAMBA_USER_ID=0
+ARG MAMBA_USER_GID=0
 ENV MAMBA_USER=$MAMBA_USER
 ENV MAMBA_ROOT_PREFIX="/opt/conda"
 ENV MAMBA_EXE="/bin/micromamba"
