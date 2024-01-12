@@ -45,7 +45,16 @@ RUN rm -rfv singlem/singlem/data singlem/.git singlem/test singlem/appraise_plot
 
 COPY --chown=$MAMBA_USER:$MAMBA_USER plastic3_and_S3.2.1.slimmed.smpkg /mpkg
 
-RUN pip install --no-dependencies kingfisher graftm
+RUN pip install --no-dependencies graftm
+
+# Install kingfisher via git because there are unreleased fixes
+# NOTE: The following 2 hashes should be changed in sync.
+ENV KINGFISHER_COMMIT 673d483
+ENV KINGFISHER_VERSION 0.3.1-dev2
+RUN rm -rf kingfisher && git init kingfisher && cd kingfisher && git remote add origin https://github.com/wwood/kingfisher-download && git fetch origin && git checkout $KINGFISHER_COMMIT
+RUN echo '__version__ = "'$KINGFISHER_VERSION.${KINGFISHER_COMMIT}'"' >kingfisher/kingfisher/version.py
+RUN cd kingfisher && rm -rf .git docker docs images test
+RUN ln -s /tmp/kingfisher/bin/kingfisher /opt/conda/bin/kingfisher
 
 # Diamond - go via direct because conda-forge version is likely slower on
 # account of not being compiled appropriately. Also, the conda version installs
