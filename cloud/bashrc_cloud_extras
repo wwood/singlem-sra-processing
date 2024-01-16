@@ -1,0 +1,44 @@
+
+
+# I seem to do this a lot
+alias us='sort |uniq -c |sort -rn'
+alias to_comma='tr '\''\n'\'' '\'','\'' |sed '\''s/,$//'\'''
+alias fq2fa='awk '\''{print ">" substr($0,2);getline;print;getline;getline}'\'''
+
+# so that git paging works correctly
+export LESS="-RS"
+alias topme='top -u `whoami`'
+alias htopme='htop -u `whoami`'
+
+# mkdir and cd, together at last
+function mkcd
+{
+  command mkdir $1 && cd $1
+}
+function f
+{
+  command $@ && echo yes || echo no
+}
+function v
+{
+  command xsv table -d '\t' $1 | less -S
+}
+function vc
+{
+  command xsv table -d ',' $1 | less -S
+}
+
+export PATH=$PATH:~/.cargo/bin:~/git/bbbin:~/git/bbbin/rust/target/release:~/bin:~/bioinfo/dashing/release/linux:~/.aspera/connect/bin:~/ownCloud/bin
+
+alias top=htop
+alias ls=exa
+
+alias a='conda activate'
+alias d='conda deactivate'
+
+BAT_PAGER="less -RC --clear-screen" # This appears to have no effect. Confused, hence the stuff below.
+alias bat='BAT_PAGER="less -RC --clear-screen" bat'
+
+alias edit=micro
+
+alias ta='tmux a'
