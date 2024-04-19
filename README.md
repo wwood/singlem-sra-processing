@@ -1,8 +1,8 @@
 Processing of public metagenomic data that has been analysed with SingleM.
 
-Not intended for public usage as many paths etc are specific to CMR / QUT / Woodcroft group.
+Most code here is not intended for public usage as many paths etc are specific to CMR / QUT / Woodcroft group, but nonetheless may be useful for others.
 
-Usage:
+# Post-processing a singlem renew run of SRA data
 
 First modify paths at the top of the Snakemake
     
@@ -19,3 +19,7 @@ snakemake --use-conda --cores 1
 
 Make sure the correct taxonomic level is chosen for applying predictions in the Snakemake file. See 
 `{base_output_directory}/logs/host_or_not_prediction.log` for the results of the cross validation.
+
+# Host-vs-not metagenome prediction
+
+Example code for host-vs-not prediction is contained within the `Snakefile`. In 
