@@ -13,9 +13,12 @@
 # HOST_OR_NOT_PREDICTION_GZ: '/home/woodcrob/m/big_data_microbiome/9_organism_prediction_r207/output_mach2/host_or_not_prediction/host_or_not_preds.csv.gz'
 
 gdtb_version = '08-RS214'
-renewed_output_base_directory = '/work/microbiome/msingle/mess/169_50_min_steps_renew/r214_renew_outputs'
-base_output_directory = '/work/microbiome/msingle/mess/169_50_min_steps_renew/processing_20240418'
-predictor_prefix = f'sra_20211215.{gdtb_version}.vanilla-'
+renewed_output_base_directory = '/work/microbiome/msingle/mess/169_50_min_steps_renew/renew_outputs'
+base_output_directory = '/work/microbiome/msingle/mess/169_50_min_steps_renew/supplemented/processing_20240419'
+predictor_prefix = f'sra_20211215.{gdtb_version}.supplemented-'
+# Set below to empty string to take on the default value
+metapackage_argument = '--metapackage /work/microbiome/msingle/mess/144_uhgg_smag_spire_oceans_combined_faa/uhgg_smag_spire_oceans_gems.smafa_db2.smpkg'
+
 acc_organism = '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/acc_organism.csv'
 taxonomy_json = '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/sra_taxonomy_table_20220208_sandpiper_5samples_mach3.json'
 sra_num_bases = '/work/microbiome/msingle/mess/117_read_fraction_of_sra/sra_20211215.num_bases'
@@ -145,4 +148,4 @@ rule microbial_fraction:
     log:
         '{}/logs/microbial_fractions.log'.format(base_output_directory)
     shell:
-        '{params.singlem_bin} microbial_fraction -p <(zcat {input.condensed_profile}) --input-metagenome-sizes {params.sra_num_bases} >{output.fractions} --accept-missing-samples 2> {log}'
+        '{params.singlem_bin} microbial_fraction -p <(zcat {input.condensed_profile}) --input-metagenome-sizes {params.sra_num_bases} >{output.fractions} --accept-missing-samples {metapackage_argument} 2> {log}'
