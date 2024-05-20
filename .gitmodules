@@ -1,0 +1,3 @@
+[submodule "singlem_host_or_ecological_predictor"]
+	path = singlem_host_or_ecological_predictor
+	url = https://github.com/wwood/singlem_host_or_ecological_predictor.git
