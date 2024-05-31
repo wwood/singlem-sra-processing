@@ -12,12 +12,12 @@
 # OTU_TABLE: '~/m/msingle/mess/102_r207_renew_of_dec_2021_sras/sra102_r207.otu_table.csv.gz'
 # HOST_OR_NOT_PREDICTION_GZ: '/home/woodcrob/m/big_data_microbiome/9_organism_prediction_r207/output_mach2/host_or_not_prediction/host_or_not_preds.csv.gz'
 
-gdtb_version = '08-RS214'
-renewed_output_base_directory = '/work/microbiome/msingle/mess/169_50_min_steps_renew/renew_outputs'
-base_output_directory = '/work/microbiome/msingle/mess/169_50_min_steps_renew/supplemented/processing_20240419'
-predictor_prefix = f'sra_20211215.{gdtb_version}.supplemented-'
+gdtb_version = '09-RS220'
+renewed_output_base_directory = '/work/microbiome/msingle/mess/174_R220_renew/renew_outputs'
+base_output_directory = '/work/microbiome/msingle/mess/174_R220_renew/processing_20240531'
+predictor_prefix = f'sra_20211215.{gdtb_version}-'
 # Set below to empty string to take on the default value
-metapackage_argument = '--metapackage /work/microbiome/msingle/mess/144_uhgg_smag_spire_oceans_combined_faa/uhgg_smag_spire_oceans_gems.smafa_db2.smpkg'
+metapackage_argument = '--metapackage /work/microbiome/db/singlem/S4.3.0.GTDB_r220.metapackage_20240523.smpkg.zb'
 
 acc_organism = '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/acc_organism.csv'
 taxonomy_json = '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/sra_taxonomy_table_20220208_sandpiper_5samples_mach3.json'
