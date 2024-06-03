@@ -31,7 +31,7 @@ function vc
 export PATH=$PATH:~/.cargo/bin:~/git/bbbin:~/git/bbbin/rust/target/release:~/bin:~/bioinfo/dashing/release/linux:~/.aspera/connect/bin:~/ownCloud/bin
 
 alias top=htop
-alias ls=exa
+# alias ls=exa
 
 alias a='conda activate'
 alias d='conda deactivate'

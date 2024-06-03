@@ -6,11 +6,11 @@ process singlem {
     // attempts in total max).
 
     // Choose a specific machine, because nextflow/batch isn't choosing the most
-    // economical machine (e2-medium), because vCPUs are shared there, unlike in
-    // the n2d series. However, still need to set cpus and memory, because
-    // otherwise the job will not be given the full resources (or at least
-    // that's the way it appears on google batch - maybe not actually true).
-    // But, may as well.
+    // economical machine (it chooses e2-medium), because vCPUs are shared
+    // there, unlike in the t2d series. However, still need to set cpus and
+    // memory, because otherwise the job will not be given the full resources
+    // (or at least that's the way it appears on google batch - maybe not
+    // actually true). But, may as well.
     machineType = { task.attempt == 1 ? 't2d-standard-1' : 't2d-standard-2'}
     cpus { task.attempt == 1 ? 1 : 2}
     memory { task.attempt == 1 ? 4.GB : 8.GB }
