@@ -43,28 +43,70 @@ RUN pip install --no-dependencies --break-system-packages graftm
 # RUN fasterq-dump --fasta-unsorted --stdout --split-files --seq-defline '>$ac.$si.$ri' /tmp/SRR8653040.sra > /tmp/SRR8653040.fasta
 # RUN head /tmp/SRR8653040.fasta && fail
 # RUN /singlem/bin/singlem pipe --forward /tmp/SRR8653040.fasta --no-assign-taxonomy --metapackage /mpkg --archive-otu-table /tmp/a.json --threads 4
-RUN apt-get install -y curl
-RUN curl -L micro.mamba.pm/install.sh |bash
-# >>> mamba initialize >>>
-# !! Contents within this block are managed by 'mamba init' !!
-# export MAMBA_EXE='/root/.local/bin/micromamba';
-# export MAMBA_ROOT_PREFIX='/root/micromamba';
-# __mamba_setup="$("$MAMBA_EXE" shell hook --shell bash --root-prefix "$MAMBA_ROOT_PREFIX" 2> /dev/null)"
-# if [ $? -eq 0 ]; then
-#     eval "$__mamba_setup"
-# else
-#     alias micromamba="$MAMBA_EXE"  # Fallback on help from mamba activate
-# fi
-# unset __mamba_setup
-# # <<< mamba initialize <<<
-ENV MAMBA_EXE '/root/.local/bin/micromamba'
-ENV MAMBA_ROOT_PREFIX '/root/micromamba'
-# RUN ln -s /root/.local/bin/micromamba /usr/local/bin/micromamba
-RUN bash -c '/root/.local/bin/micromamba create -y -c bioconda -p /conda_env sracat'
-RUN ln -s /conda_env/bin/sracat /usr/local/bin/sracat
+
+## We cannot use micromamba because sracat (and even sra-tools) is not available for aarch64 via conda
+# RUN apt-get install -y curl
+# RUN curl -L micro.mamba.pm/install.sh |bash
+# # >>> mamba initialize >>>
+# # !! Contents within this block are managed by 'mamba init' !!
+# # export MAMBA_EXE='/root/.local/bin/micromamba';
+# # export MAMBA_ROOT_PREFIX='/root/micromamba';
+# # __mamba_setup="$("$MAMBA_EXE" shell hook --shell bash --root-prefix "$MAMBA_ROOT_PREFIX" 2> /dev/null)"
+# # if [ $? -eq 0 ]; then
+# #     eval "$__mamba_setup"
+# # else
+# #     alias micromamba="$MAMBA_EXE"  # Fallback on help from mamba activate
+# # fi
+# # unset __mamba_setup
+# # # <<< mamba initialize <<<
+# ENV MAMBA_EXE '/root/.local/bin/micromamba'
+# ENV MAMBA_ROOT_PREFIX '/root/micromamba'
+# # RUN ln -s /root/.local/bin/micromamba /usr/local/bin/micromamba
+# RUN bash -c '/root/.local/bin/micromamba create -y -c bioconda -p /conda_env sracat'
+# RUN ln -s /conda_env/bin/sracat /usr/local/bin/sracat
+
+## Try building sra-toolkit from source
+# linux-headers
+# RUN apk add -y build-essential util-linux  g++ ninja cmake git perl zlib-dev bzip2-dev
+RUN apt install -y build-essential util-linux g++ ninja-build cmake git perl zlib1g-dev libbz2-dev
+ARG CMAKE_BUILD_SHARED_LIBS=1
+ARG CMAKE_BUILD_TYPE=Release
+ARG VDB_BRANCH=engineering
+ARG SRA_BRANCH=${VDB_BRANCH}
+WORKDIR /root
+RUN git clone -b ${VDB_BRANCH} --depth 1 https://github.com/ncbi/ncbi-vdb.git && \
+    git clone -b ${SRA_BRANCH} --depth 1 https://github.com/ncbi/sra-tools.git
+WORKDIR ncbi-vdb
+RUN sed -i.orig -e '/^\s*add_subdirectory\s*(\s*test\s*)\s*$/ d' CMakeLists.txt && \
+    sed -i.orig -e '/^\s*add_subdirectory\s*(\s*ktst\s*)\s*$/ d' libs/CMakeLists.txt
+WORKDIR /root
+RUN cmake -G Ninja -D CMAKE_BUILD_TYPE=Release \
+          -S ncbi-vdb -B build/ncbi-vdb && \
+    cmake --build build/ncbi-vdb
+RUN sed -i.orig -e '/^\s*add_subdirectory\s*(\s*kxml\|vdb-sqlite\s*)\s*$/ d' sra-tools/libs/CMakeLists.txt && \
+    sed -i.orig -e '/\bCPACK\|CPack/ d' sra-tools/CMakeLists.txt
+RUN cmake -G Ninja                                  \
+          -D CMAKE_BUILD_TYPE=Release               \
+          -D VDB_LIBDIR=/root/build/ncbi-vdb/lib    \
+          -S sra-tools -B build/sra-tools &&        \
+    cmake --build build/sra-tools --target install
+RUN mkdir -p /etc/ncbi
+RUN printf '/LIBS/IMAGE_GUID = "%s"\n' `uuidgen` > /etc/ncbi/settings.kfg && \
+    printf '/libs/cloud/report_instance_identity = "true"\n' >> /etc/ncbi/settings.kfg
+    
+WORKDIR /
+
+# Get sracat. Bit of a hack here but gets it done.
+RUN cd /tmp && git clone --depth 1 https://github.com/lanl/sracat
+RUN cd /tmp/sracat && cp Makefile Makefile.orig
+RUN cd /tmp/sracat && sed 's= SRA= /usr/local=' Makefile.orig |sed 's/-lncbi-vdb-static//' > Makefile && make
+RUN cd /tmp/sracat && cp sracat /usr/local/bin/sracat.real && echo '#!/bin/bash' > /usr/local/bin/sracat && echo 'LD_LIBRARY_PATH=/usr/local/lib64 /usr/local/bin/sracat.real "$@"' >> /usr/local/bin/sracat && chmod +x /usr/local/bin/sracat
+# test
+RUN sracat -h
+RUN rm -rf /tmp/sracat
 
 # singlem dependencies and data
-COPY plastic3_and_S3.2.1.slimmed.smpkg /mpkg
+COPY S4.3.0.GTDB_r220.metapackage_20240523.slim.smpkg /mpkg
 
 # NOTE: The following 2 hashes should be changed in sync.
 ENV SINGLEM_COMMIT 43c58769
