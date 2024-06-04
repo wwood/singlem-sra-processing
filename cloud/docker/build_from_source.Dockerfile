@@ -118,7 +118,14 @@ RUN ln -s /singlem/bin/singlem /usr/local/bin/singlem
 # Remove bundled singlem packages
 RUN rm -rfv singlem/singlem/data singlem/.git singlem/test singlem/appraise_plot.png
 
-COPY SRR8653040.sra /tmp/
+## Having trouble with aws-cp, blargh, eh
+RUN apt install -y curl unzip
+RUN cd /tmp && wget "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -O "awscliv2.zip" && unzip awscliv2.zip && ./aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update && rm -rf /tmp/awscliv2.zip /tmp/aws
+RUN cd /tmp && kingfisher get -r SRR8653040 -m aws-cp -f sra --guess-aws-location
+
+# RUN apt install -y curl aria2
+# RUN cd /tmp && kingfisher get -r SRR8653040 -m aws-http -f sra #--guess-aws-location
+
 RUN /singlem/bin/singlem pipe --sra-files /tmp/SRR8653040.sra --no-assign-taxonomy --metapackage /mpkg --archive-otu-table /tmp/a.json --threads 4
 
 RUN rm /tmp/SRR8653040.sra /tmp/a.json
