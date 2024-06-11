@@ -106,7 +106,7 @@ RUN sracat -h
 RUN rm -rf /tmp/sracat
 
 # singlem dependencies and data
-COPY S4.3.0.GTDB_r220.metapackage_20240523.slim.smpkg /mpkg
+COPY plastic3_and_S4.3.0.slimmed.smpkg /mpkg
 
 # NOTE: The following 2 hashes should be changed in sync.
 ENV SINGLEM_COMMIT 43c58769
@@ -118,21 +118,29 @@ RUN ln -s /singlem/bin/singlem /usr/local/bin/singlem
 # Remove bundled singlem packages
 RUN rm -rfv singlem/singlem/data singlem/.git singlem/test singlem/appraise_plot.png
 
-## Having trouble with aws-cp, blargh, eh
+## AWS cli
 RUN apt install -y curl unzip
 RUN cd /tmp && wget "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -O "awscliv2.zip" && unzip awscliv2.zip && ./aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update && rm -rf /tmp/awscliv2.zip /tmp/aws
 RUN cd /tmp && kingfisher get -r SRR8653040 -m aws-cp -f sra --guess-aws-location
 
-# RUN apt install -y curl aria2
-# RUN cd /tmp && kingfisher get -r SRR8653040 -m aws-http -f sra #--guess-aws-location
+# Check ENA downloading works
+RUN apt install -y curl aria2 pigz
+# extern.run(f'kingfisher get -r {run} --output-format-possibilities fastq.gz --hide-download-progress -m ena-ftp')
+RUN cd /tmp && kingfisher get -r SRR8653040 -m ena-ftp -f fastq.gz --hide-download-progress
 
 RUN /singlem/bin/singlem pipe --sra-files /tmp/SRR8653040.sra --no-assign-taxonomy --metapackage /mpkg --archive-otu-table /tmp/a.json --threads 4
-
 RUN rm /tmp/SRR8653040.sra /tmp/a.json
 
 # Clean apt-get files to try to make it smaller
 RUN rm -rf /var/lib/apt/lists/*
 RUN apt-get clean
+
+# Look for space savings. There are some things e.g. AWS bundles python, and gcc
+# probably isn't needed any more, but not worth the effort of debugging
+
+# COPY dust-v0.8.6-x86_64-unknown-linux-gnu/dust /usr/local/bin/dust
+# RUN chmod +x /usr/local/bin/dust
+# RUN dust -n 60 / && fail
 
 # Attempt to reduce image size
 FROM scratch
