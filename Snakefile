@@ -46,6 +46,7 @@ rule all:
         condensed_filled_table,
         otu_table,
         microbial_fractions,
+        '{}/done/per_acc_summary.done'.format(base_output_directory),
 
 rule generate_actual_otu_table:
     # Remove off-target sequences, but otherwise
@@ -149,3 +150,25 @@ rule microbial_fraction:
         '{}/logs/microbial_fractions.log'.format(base_output_directory)
     shell:
         '{params.singlem_bin} microbial_fraction -p <(zcat {input.condensed_profile}) --input-metagenome-sizes {params.sra_num_bases} >{output.fractions} --accept-missing-samples {metapackage_argument} 2> {log}'
+
+rule per_acc_summary:
+    input:
+        condensed_profile=condensed_table,
+        fractions = microbial_fractions,
+        done = '{}/done/microbial_fractions.done'.format(base_output_directory),
+        preds='{}/host_or_not_prediction/host_or_not_preds.csv'.format(base_output_directory),
+        done2 ='{}/host_or_not_prediction/apply_predictor/done'.format(base_output_directory),
+        # sra_num_bases = sra_num_bases,
+    output:
+        summary = '{}/per_acc_summary.csv'.format(base_output_directory),
+        done = touch('{}/done/per_acc_summary.done'.format(base_output_directory))
+    conda:
+        "singlem-dev"
+    log:
+        '{}/logs/per_acc_summary.log'.format(base_output_directory)
+    shell:
+        "PYTHONPATH={singlem_base_directory} "
+        "./per_acc_summary.py -p <(zcat {input.condensed_profile}) "
+        "--microbial-fractions {input.fractions} "
+        "-o {output.summary} "
+        "--host-predictions {input.preds} 2> {log}"
