@@ -27,8 +27,7 @@ sra_num_bases = '/work/microbiome/msingle/mess/117_read_fraction_of_sra/sra_2021
 tested_depth_indices = [2,3,4] # test phylum class order
 predictor_chosen_taxonomy_depth_index = 4
 
-singlem_base_directory = '~/git/singlem'
-singlem_bin = f'{singlem_base_directory}/bin/singlem'
+singlem_bin = 'singlem'
 
 ## Output paths
 condensed_table = os.path.join(base_output_directory, 'condensed.csv.gz')
@@ -57,7 +56,7 @@ rule generate_actual_otu_table:
         "singlem-dev"
     shell:
         "rm -f {log} && find {renewed_output_base_directory} -name '*json' " \
-        "|parallel -j20 --eta -N 50 {singlem_base_directory}/bin/singlem summarise --input-archive-otu-table {{}} --exclude-off-target-hits --output-otu-table /dev/stdout --quiet '|' tail -n+2" \
+        "|parallel -j20 --eta -N 50 singlem summarise --input-archive-otu-table {{}} --exclude-off-target-hits --output-otu-table /dev/stdout --quiet '|' tail -n+2" \
         "|cat otu_table_headings - |pigz >{output.otu_table} && " \
         "touch {output.done}"
 
@@ -83,7 +82,7 @@ rule fill_taxonomic_profile:
     conda:
         "singlem-dev"
     shell:
-        "{singlem_base_directory}/bin/singlem summarise --input-taxonomic-profile <(zcat {input.condensed_table}) --output-filled-taxonomic-profile >(pigz >{output.condensed_filled_table})"
+        "singlem summarise --input-taxonomic-profile <(zcat {input.condensed_table}) --output-filled-taxonomic-profile >(pigz >{output.condensed_filled_table})"
 
 rule generate_taxonomy_level_profiles_from_condensed_for_predictor:
     input:
@@ -100,7 +99,7 @@ rule generate_taxonomy_level_profiles_from_condensed_for_predictor:
     params:
         tested_index_string = ' '.join([str(i) for i in tested_depth_indices]),
     shell:
-        'PYTHONPATH={singlem_base_directory} ./singlem_host_or_ecological_predictor/bin/generate_profiles_from_condensed --depth-index-target {params.tested_index_string} --condensed-otu-table <(zcat {input.condensed_table}) --output-prefix {base_output_directory}/generate_profiles_from_condensed/{predictor_prefix} && ' \
+        './singlem_host_or_ecological_predictor/bin/generate_profiles_from_condensed --depth-index-target {params.tested_index_string} --condensed-otu-table <(zcat {input.condensed_table}) --output-prefix {base_output_directory}/generate_profiles_from_condensed/{predictor_prefix} && ' \
         'pigz {base_output_directory}/generate_profiles_from_condensed/{predictor_prefix}*.csv && ' \
         'touch {output.done}'
 
@@ -167,7 +166,7 @@ rule per_acc_summary:
     log:
         '{}/logs/per_acc_summary.log'.format(base_output_directory)
     shell:
-        "PYTHONPATH={singlem_base_directory} "
+        # "PYTHONPATH={singlem_base_directory} "
         "./per_acc_summary.py -p <(zcat {input.condensed_profile}) "
         "--microbial-fractions {input.fractions} "
         "-o {output.summary} "
