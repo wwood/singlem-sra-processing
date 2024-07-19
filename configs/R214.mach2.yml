@@ -1,0 +1,10 @@
+# As above except YAML
+GTDB_VERSION: '08-RS214'
+RENEWED_OUTPUT_BASE_DIRECTORY:  '/work/microbiome/msingle/mess/169_50_min_steps_renew/r214_renew_outputs'
+BASE_OUTPUT_DIRECTORY:  '/work/microbiome/msingle/mess/169_50_min_steps_renew/vanilla/processing_20240418.redo'
+PREDICTOR_PREFIX:  'sra_20211215.08-R214-'
+METAPACKAGE_ARGUMENT:  '--metapackage /work/microbiome/db/singlem/S4.2.2.GTDB_r214.metapackage_20240502.smpkg.zb'
+
+ACC_ORGANISM:  '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/acc_organism.csv'
+TAXONOMY_JSON:  '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/sra_taxonomy_table_20220208_sandpiper_5samples_mach3.json'
+SRA_NUM_BASES:  '/work/microbiome/msingle/mess/117_read_fraction_of_sra/sra_20211215.num_bases'

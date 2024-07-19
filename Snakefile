@@ -1,27 +1,13 @@
 
-# SANDPIPER_VERSION: '21'
+gdtb_version = config['GTDB_VERSION']
+renewed_output_base_directory = config['RENEWED_OUTPUT_BASE_DIRECTORY']
+base_output_directory = config['BASE_OUTPUT_DIRECTORY']
+predictor_prefix = config['PREDICTOR_PREFIX']
+metapackage_argument = config['METAPACKAGE_ARGUMENT']
 
-# KINGFISHER_METADATA_DATE: '20220627'
-# ACCESSIONS_FILE: ../sra_metadata/sra_metadata_20220209.accessions
-
-# BIOPROJECT_METADATA_DATE: '20220711'
-
-# JSON_METADATA_FILES: '../sra_metadata/sra_metadata_20220209/*'
-
-# CONDENSED_OTU_TABLE: '~/m/msingle/mess/102_r207_renew_of_dec_2021_sras/sra102_r207_mach2.condense.csv.gz'
-# OTU_TABLE: '~/m/msingle/mess/102_r207_renew_of_dec_2021_sras/sra102_r207.otu_table.csv.gz'
-# HOST_OR_NOT_PREDICTION_GZ: '/home/woodcrob/m/big_data_microbiome/9_organism_prediction_r207/output_mach2/host_or_not_prediction/host_or_not_preds.csv.gz'
-
-gdtb_version = '09-RS220'
-renewed_output_base_directory = '/work/microbiome/msingle/mess/174_R220_renew/renew_outputs'
-base_output_directory = '/work/microbiome/msingle/mess/174_R220_renew/processing_20240531'
-predictor_prefix = f'sra_20211215.{gdtb_version}-'
-# Set below to empty string to take on the default value
-metapackage_argument = '--metapackage /work/microbiome/db/singlem/S4.3.0.GTDB_r220.metapackage_20240523.smpkg.zb'
-
-acc_organism = '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/acc_organism.csv'
-taxonomy_json = '/work/microbiome/big_data_microbiome/9_organism_prediction_r207/sra_taxonomy_table_20220208_sandpiper_5samples_mach3.json'
-sra_num_bases = '/work/microbiome/msingle/mess/117_read_fraction_of_sra/sra_20211215.num_bases'
+acc_organism = config['ACC_ORGANISM']
+taxonomy_json = config['TAXONOMY_JSON']
+sra_num_bases = config['SRA_NUM_BASES']
 
 
 tested_depth_indices = [2,3,4] # test phylum class order
