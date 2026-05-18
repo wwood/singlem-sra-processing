@@ -28,8 +28,13 @@ scipy = "*"
 
 [feature.singlem.dependencies]
 singlem = "=0.18.3" # no particular reason for this version, just the latest at the time of writing
+iso8601 = "*"
+
+[feature.kingfisher.dependencies]
+kingfisher = ">=0.4.1"
 
 [environments]
 default = ["main"]
 main = ["main"]
 singlem = ["singlem"]
+kingfisher = ["kingfisher"]
