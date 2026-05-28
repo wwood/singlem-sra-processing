@@ -110,6 +110,9 @@ if __name__ == '__main__':
     profile_ids = []
     profile_root_coverage = []
     profile_species_coverage = []
+    profile_top1_order_fraction = []
+    profile_top3_order_fraction = []
+    profile_low_complexity = []
 
     with open(args.profile, 'r') as f:
         for sample in CondensedCommunityProfile.each_sample_wise(f):
@@ -121,18 +124,59 @@ if __name__ == '__main__':
             levels = ['root','domain','phylum','class','order','family','genus','species']
             level_id_to_level_name = {i: levels[i] for i in range(len(levels))}
             species_coverage = 0
+            domain_coverage = 0
+            phylum_coverage = 0
+            class_coverage = 0
+            order_full_coverages = []
             for node in sample.breadth_first_iter():
-                if level_id_to_level_name[node.calculate_level()] == 'species':
+                level = level_id_to_level_name[node.calculate_level()]
+                if level == 'species':
                     species_coverage += node.coverage
+                elif level == 'order':
+                    order_full_coverages.append(node.get_full_coverage())
+                elif level == 'domain':
+                    domain_coverage += node.coverage
+                elif level == 'phylum':
+                    phylum_coverage += node.coverage
+                elif level == 'class':
+                    class_coverage += node.coverage
+
+            # Low complexity: top1 order makes up >=95% of community (excluding domain, phylum, class-level coverage)
+            # Excludes reads only resolved to domain, phylum or class level from the denominator
+            # so that unresolved higher-level reads don't dilute the order-level fractions.
+            # Uses full subtree coverage per order so isolates resolved to species level are correctly flagged.
+            # Intended to flag isolates mislabelled as metagenomes
+            denominator = root_coverage - domain_coverage - phylum_coverage - class_coverage
+            if denominator > 0 and order_full_coverages:
+                order_coverages_sorted = sorted(order_full_coverages, reverse=True)
+                top1_fraction = round(order_coverages_sorted[0] / denominator * 100, 2)
+                top3 = sum(order_coverages_sorted[:3])
+                top3_fraction = round(top3 / denominator * 100, 2)
+                low_complexity = 'yes' if order_coverages_sorted[0] / denominator >= 0.95 else 'no'
+            else:
+                top1_fraction = None
+                top3_fraction = None
+                low_complexity = 'no'
 
             profile_ids.append(sample_id)
             profile_root_coverage.append(root_coverage)
             profile_species_coverage.append(species_coverage)
+            profile_top1_order_fraction.append(top1_fraction)
+            profile_top3_order_fraction.append(top3_fraction)
+            profile_low_complexity.append(low_complexity)
 
     coverages = pl.DataFrame({
         'sample': profile_ids,
         'root_coverage': profile_root_coverage,
-        'species_coverage': profile_species_coverage
+        'species_coverage': profile_species_coverage,
+        'top1_order_fraction': profile_top1_order_fraction,
+        'top3_order_fraction': profile_top3_order_fraction,
+        'low_complexity': profile_low_complexity,
+    }, schema_overrides={
+        'root_coverage': pl.Float64,
+        'species_coverage': pl.Float64,
+        'top1_order_fraction': pl.Float64,
+        'top3_order_fraction': pl.Float64,
     })
     # round(2)
     coverages = coverages.with_columns(pl.col('root_coverage').round(2))

@@ -1,4 +1,4 @@
-raise Exception("Modify as 'singlem 2-73 collecting metadata for sandpiper 1.1.0' in my obsidian notes for next version")
+
 
 gdtb_version = config['GTDB_VERSION']
 renewed_output_base_directory = config['RENEWED_OUTPUT_BASE_DIRECTORY']
@@ -9,6 +9,7 @@ metapackage_argument = config['METAPACKAGE_ARGUMENT']
 acc_organism = config['ACC_ORGANISM']
 taxonomy_json = config['TAXONOMY_JSON']
 sra_num_bases = config['SRA_NUM_BASES']
+condensed_directory = config.get('CONDENSED_DIRECTORY', renewed_output_base_directory)
 
 
 tested_depth_indices = [2,3,4] # test phylum class order
@@ -22,6 +23,18 @@ condensed_table = os.path.join(base_output_directory, 'condensed.csv.gz')
 condensed_filled_table = os.path.join(base_output_directory, 'condensed.filled.csv.gz')
 otu_table = os.path.join(base_output_directory, 'otu_table.csv.gz')
 microbial_fractions = os.path.join(base_output_directory, 'microbial_fractions.csv')
+per_acc_summary_file = os.path.join(base_output_directory, 'per_acc_summary.csv')
+accessions_file = os.path.join(base_output_directory, 'accessions.txt')
+kingfisher_metadata_file = os.path.join(base_output_directory, 'kingfisher_metadata.tsv')
+parsed_metadata_file = os.path.join(base_output_directory, 'parsed_metadata.tsv')
+parse_biosample_extras_path = '../sandpiper/backend/sandpiper/parse_biosample_extras.py'
+
+## Test output paths (prefixed symlinks)
+test_condensed_filled_table = os.path.join(base_output_directory, 'test_condensed.filled.csv.gz')
+test_otu_table = os.path.join(base_output_directory, 'test_otu_table.csv.gz')
+test_microbial_fractions = os.path.join(base_output_directory, 'test_microbial_fractions.csv')
+test_per_acc_summary = os.path.join(base_output_directory, 'test_per_acc_summary.csv')
+test_parsed_metadata = os.path.join(base_output_directory, 'test_parsed_metadata.tsv')
 
 # mkdir '{}/logs'.format(base_output_directory)
 os.makedirs('{}/logs'.format(base_output_directory), exist_ok=True)
@@ -36,6 +49,11 @@ rule all:
         otu_table,
         microbial_fractions,
         '{}/done/per_acc_summary.done'.format(base_output_directory),
+        test_condensed_filled_table,
+        test_otu_table,
+        test_microbial_fractions,
+        test_per_acc_summary,
+        test_parsed_metadata,
 
 rule generate_actual_otu_table:
     # Remove off-target sequences, but otherwise
@@ -62,7 +80,7 @@ rule generate_condensed_otu_table:
         mem_mb = 8000,
         runtime = '24h',
     shell:
-        "find {renewed_output_base_directory} -name '*condensed.csv' > {output.condensed_table_list} && " \
+        "find {condensed_directory} -name '*condensed.csv' > {output.condensed_table_list} && " \
         "cat <(head -1 `head -1 {output.condensed_table_list}`) <(cat {output.condensed_table_list} |parallel --ungroup --eta -j1 --xargs tail -q -n+2 {{}}) |pigz >{output.condensed_table} && " \
         "touch {output.done}"
 
@@ -94,12 +112,10 @@ rule generate_taxonomy_level_profiles_from_condensed_for_predictor:
     resources:
         mem_mb = 8000,
         runtime = '24h',
-    conda:
-        'singlem_host_or_ecological_predictor/envs/host_or_not_prediction.yml'
     params:
         tested_index_string = ' '.join([str(i) for i in tested_depth_indices]),
     shell:
-        './singlem_host_or_ecological_predictor/bin/generate_profiles_from_condensed --depth-index-target {params.tested_index_string} --condensed-otu-table <(zcat {input.condensed_table}) --output-prefix {base_output_directory}/generate_profiles_from_condensed/{predictor_prefix} && ' \
+        'pixi run -e singlem python ./singlem_host_or_ecological_predictor/bin/generate_profiles_from_condensed --depth-index-target {params.tested_index_string} --condensed-otu-table <(zcat {input.condensed_table}) --output-prefix {base_output_directory}/generate_profiles_from_condensed/{predictor_prefix} && ' \
         'pigz {base_output_directory}/generate_profiles_from_condensed/{predictor_prefix}*.csv'
 
 rule generate_predictor:
@@ -187,3 +203,70 @@ rule per_acc_summary:
         "--host-predictions {input.preds} "
         "--acc-organism-csv {acc_organism} " # Must read from here otherwise ones like "synthetic metagenome" will be missing from the acc-organism mapping, and thus not get the right organism in the summary.
         "2> {log}"
+
+rule extract_accessions:
+    output:
+        accessions_file,
+    shell:
+        "find {renewed_output_base_directory} -name '*json' | sed 's/.*\\///' | sed 's/\\.json$//' | sort -u > {output}"
+
+rule run_kingfisher_annotate:
+    input:
+        accessions = accessions_file,
+    output:
+        metadata = kingfisher_metadata_file,
+        done = touch(os.path.join(base_output_directory, 'done/kingfisher_annotate.done')),
+    log:
+        os.path.join(base_output_directory, 'logs/kingfisher_annotate.log'),
+    threads: 4
+    resources:
+        mem_mb = 128000,
+        runtime = '24h',
+    params:
+        chunk_dir = os.path.join(base_output_directory, 'kingfisher_chunks'),
+        n_chunks = 4,
+    shell:
+        "rm -rf {params.chunk_dir} && mkdir -p {params.chunk_dir} && "
+        "split -n l/{params.n_chunks} {input.accessions} {params.chunk_dir}/chunk_ && "
+        "ls {params.chunk_dir}/chunk_* | parallel -j {threads} --retries 10 --delay 60 "
+        "'NCBI_API_KEY=" + config.get('NCBI_API_KEY', '') + " pixi run -e kingfisher kingfisher annotate -f tsv --all-columns --run-identifiers-list {{}} -o {{}}.tsv > {{}}.log 2>&1' && "
+        "cat {params.chunk_dir}/chunk_*.log > {log} && "
+        "pixi run -e singlem python merge_tsv_chunks.py --chunk-dir {params.chunk_dir} --output {output.metadata}"
+
+rule generate_parsed_metadata:
+    input:
+        metadata = kingfisher_metadata_file,
+        done = os.path.join(base_output_directory, 'done/kingfisher_annotate.done'),
+    output:
+        parsed_metadata = parsed_metadata_file,
+        done = touch(os.path.join(base_output_directory, 'done/parsed_metadata.done')),
+    log:
+        os.path.join(base_output_directory, 'logs/parsed_metadata.log'),
+    threads: 1
+    resources:
+        mem_mb = 8000,
+        runtime = '24h',
+    shell:
+        "pixi run -e singlem python {parse_biosample_extras_path} --kingfisher-annotate-tsvs {input.metadata} --extra-sample-keys depth temperature collection_date > {output.parsed_metadata} 2> {log}"
+
+rule create_test_outputs:
+    input:
+        condensed_filled = condensed_filled_table,
+        otu_table = otu_table,
+        microbial_fractions = microbial_fractions,
+        per_acc_summary = per_acc_summary_file,
+        per_acc_summary_done = '{}/done/per_acc_summary.done'.format(base_output_directory),
+        parsed_metadata = parsed_metadata_file,
+        parsed_metadata_done = os.path.join(base_output_directory, 'done/parsed_metadata.done'),
+    output:
+        condensed_filled = test_condensed_filled_table,
+        otu_table = test_otu_table,
+        microbial_fractions = test_microbial_fractions,
+        per_acc_summary = test_per_acc_summary,
+        parsed_metadata = test_parsed_metadata,
+    shell:
+        "ln -sf {input.condensed_filled} {output.condensed_filled} && "
+        "ln -sf {input.otu_table} {output.otu_table} && "
+        "ln -sf {input.microbial_fractions} {output.microbial_fractions} && "
+        "ln -sf {input.per_acc_summary} {output.per_acc_summary} && "
+        "ln -sf {input.parsed_metadata} {output.parsed_metadata}"
