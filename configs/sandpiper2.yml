@@ -8,4 +8,3 @@ METAPACKAGE_ARGUMENT: '--metapackage /work/microbiome/msingle/mess/214_R232_rene
 ACC_ORGANISM: '/work/microbiome/msingle/mess/220_sandpiper_R232/data/shotgun_sra_20260303.acc_organism.csv'
 TAXONOMY_JSON: '/work/microbiome/msingle/mess/220_sandpiper_R232/data/sra_taxonomy_table_20260303.json'
 SRA_NUM_BASES: '/work/microbiome/msingle/mess/220_sandpiper_R232/data/shotgun_sra_20260303.acc_num_bases.tsv'
-NCBI_API_KEY: 'b8110e58af25f2e3aec503694dda7d605308'
