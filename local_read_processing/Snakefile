@@ -8,19 +8,29 @@ Prerequisites
 
 2.  Ensure the lyrebird metapackage has been downloaded:
         lyrebird data --output-directory /path/to/lyrebird_metapackage
-    If you have a metapackage, set LYREBIRD_METAPACKAGE below (or leave
-    empty to let lyrebird use its default search path).
+    If you have a metapackage, set lyrebird_metapackage in the config.
 
-Outputs (per accession ACC, prefix = ACC[:6])
-----------------------------------------------
-  results/archives/<prefix>/<ACC>.json.gz   --archive-otu-table, gzipped
-  results/profiles/<prefix>/<ACC>.json.gz   -p (taxonomic profile), gzipped
-  results/done/<prefix>/<ACC>.done          touch sentinel
+Processing stages per sample
+----------------------------
+1. lyrebird_pipe_chunk : lyrebird pipe --no-assign-taxonomy on each chunk of
+                         ~5e9/150 reads (consistent across all read lengths).
+                         → chunks/<prefix>/<acc>.chunk<N>.json.gz
+2. lyrebird_pipe_r0    : lyrebird pipe on the companion single-end file, for
+                         accessions that have a paired + single-end layout.
+                         → chunks/<prefix>/<acc>.r0.json.gz
+3. lyrebird_summarise  : singlem summarise combines all per-chunk archives
+                         (including the r0 archive when present).
+                         → archives/<prefix>/<acc>.json.gz  (unannotated)
+4. lyrebird_renew      : singlem renew assigns taxonomy and produces a
+                         condensed profile.
+                         → renew/<prefix>/<acc>.json.gz
+                         → profiles/<prefix>/<acc>.profile.tsv
 """
 
+import math
 import os
 import sys
-import pandas as pd
+import polars as pl
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -33,6 +43,10 @@ LYREBIRD_METAPACKAGE = config["lyrebird_metapackage"]
 SAMPLES_CSV          = config["samples_csv"]
 RESULTS_DIR          = config["results_dir"]
 
+# Target reads per chunk: equivalent to 5 Gbp at 150 bp/read, rounded to even.
+_rpc = math.ceil(5e9 / 150)
+READS_PER_CHUNK = _rpc + (_rpc % 2)   # 33,333,334
+
 # ---------------------------------------------------------------------------
 # Load samples
 # ---------------------------------------------------------------------------
@@ -44,19 +58,38 @@ if not os.path.exists(SAMPLES_CSV):
         "  snakemake --snakefile workflow/find_samples.smk --cores 1"
     )
 
-samples_df = pd.read_csv(SAMPLES_CSV, dtype=str, keep_default_na=False)
+samples_df = pl.read_csv(SAMPLES_CSV, infer_schema_length=0)
 
-SAMPLES = {}
-for _, row in samples_df.iterrows():
+_has_r0       = "r0"       in samples_df.columns
+_has_reads_r1 = "reads_r1" in samples_df.columns
+
+SAMPLES    = {}
+CHUNK_INFO = {}   # acc -> {"chunk_size": int, "num_chunks": int}
+
+for row in samples_df.iter_rows(named=True):
     acc = row["acc"].strip()
     r1  = row["r1"].strip()
-    r2  = row["r2"].strip() if row["r2"].strip() else None
+    r2  = row["r2"].strip() if row["r2"] and row["r2"].strip() else None
+    r0  = row["r0"].strip() if _has_r0 and row["r0"] and row["r0"].strip() else None
     if not r1:
         continue
-    SAMPLES[acc] = {"r1": r1, "r2": r2}
+    SAMPLES[acc] = {"r1": r1, "r2": r2, "r0": r0}
+
+    # Chunk parameters derived from read counts in the CSV.
+    # chunk_size=0 means no --read-chunk-* flags (single un-chunked job).
+    reads_r1 = 0
+    if _has_reads_r1:
+        try:
+            reads_r1 = int(row["reads_r1"])
+        except (ValueError, TypeError):
+            pass
+    if reads_r1 > 0:
+        CHUNK_INFO[acc] = {"chunk_size": READS_PER_CHUNK,
+                           "num_chunks": max(1, math.ceil(reads_r1 / READS_PER_CHUNK))}
+    else:
+        CHUNK_INFO[acc] = {"chunk_size": 0, "num_chunks": 1}
 
 ALL_ACCS     = sorted(SAMPLES.keys())
-ALL_ACCS = ALL_ACCS[:2] # debug
 ALL_PREFIXES = [acc[:6] for acc in ALL_ACCS]
 
 # ---------------------------------------------------------------------------
@@ -78,10 +111,32 @@ def lyrebird_reads_params(wildcards):
     return f"--forward {s['r1']}"
 
 
-def metapackage_param(_wildcards):
+def metapackage_param(wildcards):
     if LYREBIRD_METAPACKAGE:
         return f"--metapackage {LYREBIRD_METAPACKAGE}"
     return ""
+
+
+def chunk_args(wildcards):
+    info = CHUNK_INFO[wildcards.acc]
+    if info["chunk_size"] > 0:
+        return (
+            f"--read-chunk-number {wildcards.chunk} "
+            f"--read-chunk-size {info['chunk_size']}"
+        )
+    return ""
+
+
+def chunk_inputs(wildcards):
+    """Return all archive paths to merge for one accession."""
+    prefix = wildcards.acc[:6]
+    files = [
+        f"{RESULTS_DIR}/chunks/{prefix}/{wildcards.acc}.chunk{i}.json.gz"
+        for i in range(1, CHUNK_INFO[wildcards.acc]["num_chunks"] + 1)
+    ]
+    if SAMPLES[wildcards.acc].get("r0"):
+        files.append(f"{RESULTS_DIR}/chunks/{prefix}/{wildcards.acc}.r0.json.gz")
+    return files
 
 
 # ---------------------------------------------------------------------------
@@ -91,39 +146,34 @@ def metapackage_param(_wildcards):
 rule all:
     input:
         expand(
-            f"{RESULTS_DIR}/archives/{{prefix}}/{{acc}}.json.gz",
-            zip,
-            prefix=ALL_PREFIXES,
-            acc=ALL_ACCS,
+            f"{RESULTS_DIR}/renew/{{prefix}}/{{acc}}.json.gz",
+            zip, prefix=ALL_PREFIXES, acc=ALL_ACCS,
         ),
         expand(
-            f"{RESULTS_DIR}/profiles/{{prefix}}/{{acc}}.json.gz",
-            zip,
-            prefix=ALL_PREFIXES,
-            acc=ALL_ACCS,
+            f"{RESULTS_DIR}/profiles/{{prefix}}/{{acc}}.profile.tsv",
+            zip, prefix=ALL_PREFIXES, acc=ALL_ACCS,
         ),
 
 
-rule lyrebird_pipe:
-    """Run lyrebird pipe on one sample, then gzip the archive OTU table."""
+rule lyrebird_pipe_chunk:
+    """Run lyrebird pipe on one ~{READS_PER_CHUNK}-read chunk, without taxonomy assignment."""
     input:
         lyrebird_input,
     output:
-        archive = f"{RESULTS_DIR}/archives/{{prefix}}/{{acc}}.json.gz",
-        profile = f"{RESULTS_DIR}/profiles/{{prefix}}/{{acc}}.json.gz",
-        done    = touch(f"{RESULTS_DIR}/done/{{prefix}}/{{acc}}.done"),
+        archive = temp(f"{RESULTS_DIR}/chunks/{{prefix}}/{{acc}}.chunk{{chunk}}.json.gz"),
     params:
-        reads      = lyrebird_reads_params,
+        reads       = lyrebird_reads_params,
         metapackage = metapackage_param,
-    retries: 1
-    threads: lambda wildcards, attempt: 8 if attempt == 1 else 16
+        chunk_args  = chunk_args,
+    # retries: 1
+    threads: lambda wildcards, attempt: 4 if attempt == 1 else 8
     resources:
-        mem_mb      = 32 * 1024,   # 32 GB
-        runtime     = lambda wildcards, attempt: '24h' if attempt == 1 else '48h'
+        mem_mb  = lambda wildcards, attempt: 16 * 1024 if attempt == 1 else 32 * 1024,
+        runtime = '48h' #lambda wildcards, attempt: "12h" if attempt == 1 else "24h",
     benchmark:
-        f"{RESULTS_DIR}/benchmarks/{{prefix}}/{{acc}}.csv",
+        f"{RESULTS_DIR}/benchmarks/chunks/{{prefix}}/{{acc}}.chunk{{chunk}}.csv",
     log:
-        f"{RESULTS_DIR}/logs/{{prefix}}/{{acc}}.log",
+        f"{RESULTS_DIR}/logs/chunks/{{prefix}}/{{acc}}.chunk{{chunk}}.log",
     shell:
         r"""
         set -euo pipefail
@@ -131,13 +181,115 @@ rule lyrebird_pipe:
         tmpdir=$(mktemp -d)
         trap "rm -rf '$tmpdir'" EXIT
 
-        pixi run --manifest-path singlem/pixi.toml lyrebird pipe \
+        pixi run  --manifest-path singlem/pixi.toml lyrebird pipe \
             {params.reads} \
+            --no-assign-taxonomy \
             --archive-otu-table "$tmpdir/archive.json" \
-            -p "$tmpdir/profile.tsv" \
+            --threads {threads} \
+            {params.metapackage} \
+            {params.chunk_args}
+
+        gzip -c "$tmpdir/archive.json" > {output.archive}
+        """
+
+
+rule lyrebird_pipe_r0:
+    """Run lyrebird pipe on the companion single-end file (no chunking)."""
+    input:
+        lambda wc: [SAMPLES[wc.acc]["r0"]],
+    output:
+        archive = temp(f"{RESULTS_DIR}/chunks/{{prefix}}/{{acc}}.r0.json.gz"),
+    params:
+        reads       = lambda wc: f"--forward {SAMPLES[wc.acc]['r0']}",
+        metapackage = metapackage_param,
+    threads: lambda wildcards, attempt: 4 if attempt == 1 else 8
+    resources:
+        mem_mb  = lambda wildcards, attempt: 16 * 1024 if attempt == 1 else 32 * 1024,
+        runtime = '48h' #lambda wildcards, attempt: "12h" if attempt == 1 else "24h",
+    benchmark:
+        f"{RESULTS_DIR}/benchmarks/chunks/{{prefix}}/{{acc}}.r0.csv",
+    log:
+        f"{RESULTS_DIR}/logs/chunks/{{prefix}}/{{acc}}.r0.log",
+    shell:
+        r"""
+        set -euo pipefail
+        exec >{log} 2>&1
+        tmpdir=$(mktemp -d)
+        trap "rm -rf '$tmpdir'" EXIT
+
+        pixi run  --manifest-path singlem/pixi.toml lyrebird pipe \
+            {params.reads} \
+            --no-assign-taxonomy \
+            --archive-otu-table "$tmpdir/archive.json" \
             --threads {threads} \
             {params.metapackage}
 
         gzip -c "$tmpdir/archive.json" > {output.archive}
-        gzip -c "$tmpdir/profile.tsv"  > {output.profile}
+        """
+
+
+rule lyrebird_summarise:
+    """Combine all per-chunk (and r0) unannotated archives into one archive per accession."""
+    input:
+        chunk_inputs,
+    output:
+        archive = temp(f"{RESULTS_DIR}/archives/{{prefix}}/{{acc}}.json.gz"),
+    params:
+        acc = lambda wc: wc.acc,
+    threads: 1
+    resources:
+        mem_mb  = 8 * 1024,
+        runtime = "1h",
+    log:
+        f"{RESULTS_DIR}/logs/summarise/{{prefix}}/{{acc}}.log",
+    shell:
+        r"""
+        set -euo pipefail
+        exec >{log} 2>&1
+        tmpdir=$(mktemp -d)
+        trap "rm -rf '$tmpdir'" EXIT
+
+        printf '%s\n' {input} > "$tmpdir/chunk_list.txt"
+
+        pixi run --manifest-path singlem/pixi.toml singlem summarise \
+            --input-gzip-archive-otu-table-list "$tmpdir/chunk_list.txt" \
+            --output-archive-otu-table "$tmpdir/archive.json" \
+            --collapse-to-sample-name {params.acc}
+
+        gzip -c "$tmpdir/archive.json" > {output.archive}
+        """
+
+
+rule lyrebird_renew:
+    """Assign taxonomy to the combined archive and generate a condensed profile."""
+    input:
+        archive = f"{RESULTS_DIR}/archives/{{prefix}}/{{acc}}.json.gz",
+    output:
+        archive = f"{RESULTS_DIR}/renew/{{prefix}}/{{acc}}.json.gz",
+        profile = f"{RESULTS_DIR}/profiles/{{prefix}}/{{acc}}.profile.tsv",
+    params:
+        metapackage = metapackage_param,
+    threads: 1
+    resources:
+        mem_mb  = 8 * 1024,
+        runtime = "4h",
+    benchmark:
+        f"{RESULTS_DIR}/benchmarks/renew/{{prefix}}/{{acc}}.csv",
+    log:
+        f"{RESULTS_DIR}/logs/renew/{{prefix}}/{{acc}}.log",
+    shell:
+        r"""
+        set -euo pipefail
+        exec >{log} 2>&1
+        tmpdir=$(mktemp -d)
+        trap "rm -rf '$tmpdir'" EXIT
+
+        pixi run --manifest-path singlem/pixi.toml lyrebird renew \
+            --input-archive-otu-table {input.archive} \
+            --archive-otu-table "$tmpdir/renew.json" \
+            -p {output.profile} \
+            --threads {threads} \
+            {params.metapackage}
+
+        gzip -c "$tmpdir/renew.json" > {output.archive}
         """
