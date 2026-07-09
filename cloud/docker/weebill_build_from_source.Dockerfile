@@ -68,8 +68,10 @@ RUN apt-get install -y uuid-runtime \
     && printf '/LIBS/IMAGE_GUID = "%s"\n' `uuidgen` > /etc/ncbi/settings.kfg \
     && printf '/libs/cloud/report_instance_identity = "true"\n' >> /etc/ncbi/settings.kfg
 
-# kingfisher (SRA/ENA downloader) and its runtime deps
-RUN apt-get install -y python3-requests python3-tqdm aria2 pigz
+# kingfisher (SRA/ENA downloader) and its runtime deps. kingfisher is installed
+# with --no-dependencies, so its imports (incl. pandas, imported at startup) must
+# be provided here explicitly, otherwise `kingfisher get` fails with ModuleNotFoundError.
+RUN apt-get install -y python3-requests python3-tqdm python3-pandas python3-numpy aria2 pigz
 RUN pip install --no-dependencies --break-system-packages \
     bird_tool_utils argparse-manpage-birdtools extern
 RUN pip install --no-dependencies --break-system-packages kingfisher

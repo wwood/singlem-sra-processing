@@ -63,6 +63,7 @@ spec:
         image: public.ecr.aws/r8c0q0v5/woodcrob/weebill:latest
         command: [bash,-c]
         args: ["
+        set -eo pipefail;
         echo workflow UID: {{workflow.uid}};
         echo date: `date`;
         mkdir -p logs sketches;

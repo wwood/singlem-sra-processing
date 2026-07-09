@@ -183,7 +183,7 @@ if __name__ == '__main__':
                 while True:
                     try:
                         os.makedirs("submissions", exist_ok=True)
-                        extern.run(f"argo submit -n argo -o json {f.name} |jq > submissions/multi-{i}-`date +%Y%m%d-%I%M`.argo_submission.json")
+                        extern.run(f"argo submit -n argo -o json {f.name} |jq > submissions/multi-{i}-`date +%Y%m%d-%H%M%S`.argo_submission.json")
                     except extern.ExternCalledProcessError as e:
                         logging.warning("Failed to argo submit. Retrying after pause. Error was {}".format(e))
                         time.sleep(args.sleep_interval)
