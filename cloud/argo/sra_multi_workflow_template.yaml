@@ -14,12 +14,21 @@ metadata:
       Per accession, with no intermediate fastq written to disk:
         kingfisher get                          -> $A.sra
         sracat-rs --single-out singles.fifo ...  > pairs.fifo   (one writer, two FIFOs)
-        weebill sketch --merge --interleaved pairs.fifo --reads singles.fifo
+        weebill sketch --merge --reference $REF --interleaved pairs.fifo --reads singles.fifo -d $A
       sracat-rs streams interleaved paired reads to one FIFO and single/orphan reads
       to the other; `weebill sketch --merge` sketches each FIFO on its own thread (so
       both are drained concurrently and neither pipe deadlocks) and merges them into a
-      single compressed sample sketch (.sylspc). See the weebill_build_from_source
-      Dockerfile in cloud/docker for the image.
+      single reference-compressed sample sketch (.sylspr). See the
+      weebill_build_from_source Dockerfile in cloud/docker for the image.
+
+      The .sylspr output is written against a weebill .sylref reference DB. That DB is
+      large but seekable, so rather than baking it into the image or copying it per
+      pod, the fetch-reference initContainer downloads it once per node onto a hostPath
+      cache (reference_s3_uri) shared by every pod on the node; the sketch step then
+      preads only the blocks each sample needs from that local copy.
+
+      Per-accession failure isolation: a failed accession is recorded to a 'failures'
+      artifact and does not abort the pod, so its siblings' sketches still upload.
 
       To avoid a single node being overwhelmed by many large SRA downloads running in
       different pods at once, the pod requests ephemeral-storage proportional to the
@@ -30,6 +39,16 @@ metadata:
       footprint is essentially just the .sra file being processed.
 spec:
   entrypoint: singlem
+
+  # Node-local cache for the weebill .sylref reference DB. hostPath is shared by
+  # all pods on a node, so the reference is downloaded once per node (by the
+  # fetch-reference initContainer) rather than once per pod. DirectoryOrCreate so
+  # the path is created on first use.
+  volumes:
+    - name: ref-cache
+      hostPath:
+        path: /mnt/weebill-ref-cache
+        type: DirectoryOrCreate
 
   podGC:
     # Pod GC strategy must be one of the following:
@@ -59,24 +78,77 @@ spec:
             # download+processing footprint of every accession in SRA_accession_num.
             # Used purely as a scheduler constraint so nodes are not overloaded.
             value: '{{workflow.parameters.ephemeral_storage_mb}}'
+          - name: reference_s3_uri
+            # s3:// URI of the weebill .sylref reference DB. Cached once per node on
+            # a hostPath (see the fetch-reference initContainer below) and read by
+            # `weebill sketch --reference` to write .sylspr sketches directly.
+            value: '{{workflow.parameters.reference_s3_uri}}'
+      # Cache the (large) .sylref on the node's local disk exactly once, shared by
+      # every pod that lands on this node. The .sylref is seekable, so the sketch
+      # step reads only the blocks it needs via pread from this local copy.
+      initContainers:
+        - name: fetch-reference
+          image: public.ecr.aws/r8c0q0v5/woodcrob/weebill:latest
+          volumeMounts:
+            - name: ref-cache
+              mountPath: /refcache
+              # read-write: this container populates the cache
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: my-s3-credentials
+                  key: accessKey
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: my-s3-credentials
+                  key: secretKey
+          command: [bash, -c]
+          args:
+            - |
+              set -eo pipefail
+              REF_URI='{{inputs.parameters.reference_s3_uri}}'
+              REF="/refcache/$(basename "$REF_URI")"
+              mkdir -p /refcache
+              # Serialise across pods that start on this node at the same time, so
+              # the reference is downloaded once. flock is held for the whole block.
+              exec 9>/refcache/.download.lock
+              flock 9
+              if [ -s "$REF" ]; then
+                echo "Reference already cached: $REF"
+              else
+                echo "Downloading $REF_URI -> $REF"
+                aws s3 cp "$REF_URI" "$REF.tmp" --quiet
+                mv "$REF.tmp" "$REF"
+              fi
+              ls -lh "$REF"
       container:
         image: public.ecr.aws/r8c0q0v5/woodcrob/weebill:latest
+        volumeMounts:
+          - name: ref-cache
+            mountPath: /refcache
+            readOnly: true
         command: [bash,-c]
         args: ["
         echo workflow UID: {{workflow.uid}};
         echo date: `date`;
+        REF=/refcache/`basename {{inputs.parameters.reference_s3_uri}}`;
+        ls -lh $REF;
         mkdir -p logs sketches;
         for A in {{inputs.parameters.SRA_accession_num}}; do
-        A=$A bash -e -o pipefail -c '
+        A=$A REF=$REF bash -e -o pipefail -c '
         echo processing $A on `date`;
         kingfisher get -r $A --output-format-possibilities sra --guess-aws-location --hide-download-progress -m aws-http;
         ls -lh $A.sra; free -h; df -h;
         mkfifo $A.pairs.fifo $A.singles.fifo;
         sracat-rs --single-out $A.singles.fifo $A.sra > $A.pairs.fifo &
         sracat_pid=$!;
-        weebill sketch --merge --interleaved $A.pairs.fifo --reads $A.singles.fifo -S $A --compressed-database $A -t 4;
+        weebill sketch --merge --reference $REF --interleaved $A.pairs.fifo --reads $A.singles.fifo -S $A -d $A -t 4;
         wait $sracat_pid;
-        mv $A.sylspc sketches/$A.sylspc;
+        mv $A.sylspr sketches/$A.sylspr;
         echo passed $A;
         ' 2>&1 | tee -a logs/$A.log;
         status=${PIPESTATUS[0]};

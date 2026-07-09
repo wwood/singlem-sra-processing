@@ -60,6 +60,9 @@ if __name__ == '__main__':
         help='CSV with headers, at least pod_accessions (space separated accessions), '
              'batch_name and ephemeral_storage_mb')
     parent_parser.add_argument('--workflow-template', required=True, help='workflow template to use')
+    parent_parser.add_argument('--reference-s3-uri', required=True,
+        help='s3:// URI of the weebill .sylref reference DB, node-cached and read by '
+             '`weebill sketch --reference` to write .sylspr sketches. Same for the whole batch.')
     parent_parser.add_argument('--sleep-interval', type=int, help='sleep this many seconds between submissions', default=60 * 5)
     parent_parser.add_argument('--min-running-pending-file', help='only submit when the number of jobs is below this (a number in a file)')
     parent_parser.add_argument('--batch-size', type=int, help='submit this many pods each time')
@@ -177,6 +180,7 @@ if __name__ == '__main__':
                         "{{workflow.parameters.SRA_accession_num}}", row['pod_accessions']).replace(
                         'generateName: singlem-', f'generateName: multi-{first_acc}-').replace(
                         "{{workflow.parameters.ephemeral_storage_mb}}", str(row['ephemeral_storage_mb'])).replace(
+                        "{{workflow.parameters.reference_s3_uri}}", args.reference_s3_uri).replace(
                         "{{workflow.parameters.batch_name}}", row['batch_name']))
                 f.flush()
 
