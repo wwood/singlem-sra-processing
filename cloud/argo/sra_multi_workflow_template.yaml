@@ -63,11 +63,11 @@ spec:
         image: public.ecr.aws/r8c0q0v5/woodcrob/weebill:latest
         command: [bash,-c]
         args: ["
-        set -eo pipefail;
         echo workflow UID: {{workflow.uid}};
         echo date: `date`;
         mkdir -p logs sketches;
-        for A in {{inputs.parameters.SRA_accession_num}}; do A=$A bash -e -o pipefail -c '
+        for A in {{inputs.parameters.SRA_accession_num}}; do
+        A=$A bash -e -o pipefail -c '
         echo processing $A on `date`;
         kingfisher get -r $A --output-format-possibilities sra --guess-aws-location --hide-download-progress -m aws-http;
         ls -lh $A.sra; free -h; df -h;
@@ -77,11 +77,13 @@ spec:
         weebill sketch --merge --interleaved $A.pairs.fifo --reads $A.singles.fifo -S $A --compressed-database $A -t 4;
         wait $sracat_pid;
         mv $A.sylspc sketches/$A.sylspc;
-        rm -f $A.sra $A.pairs.fifo $A.singles.fifo;
         echo passed $A;
-        find sketches/$A.sylspc -type f -empty -delete;
-        echo workflow UID: {{workflow.uid}};
         ' 2>&1 | tee -a logs/$A.log;
+        status=${PIPESTATUS[0]};
+        if [ $status -ne 0 ]; then echo FAILED $A exit $status | tee -a logs/$A.log; mkdir -p failures; echo $A >> failures/failed_accessions.txt; fi;
+        rm -f $A.sra $A.pairs.fifo $A.singles.fifo;
+        find sketches -type f -empty -delete;
+        echo workflow UID: {{workflow.uid}};
         done"
         ]
         resources:
@@ -119,6 +121,25 @@ spec:
               endpoint: s3.us-east-1.amazonaws.com
               bucket: woodcrob-sandpiper-us-east-1
               key: '{{workflow.parameters.batch_name}}/logs/{{workflow.uid}}'
+              region: us-east-1
+              accessKeySecret:
+                name: my-s3-credentials
+                key: accessKey
+              secretKeySecret:
+                name: my-s3-credentials
+                key: secretKey
+          - name: failures-art
+            # Per-accession failure isolation: a failed accession does not abort the
+            # pod (its siblings' sketches still upload); instead its name is recorded
+            # here. 'failures/' only exists when something failed, so this is optional.
+            path: 'failures'
+            optional: true
+            archive: # do not tar.gz the file as argo does by default
+              none: {}
+            s3:
+              endpoint: s3.us-east-1.amazonaws.com
+              bucket: woodcrob-sandpiper-us-east-1
+              key: '{{workflow.parameters.batch_name}}/failures/{{workflow.uid}}'
               region: us-east-1
               accessKeySecret:
                 name: my-s3-credentials
