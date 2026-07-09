@@ -1,0 +1,127 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: singlem-
+  # labels:
+  #   workflows.argoproj.io/archive-strategy: "false"
+  annotations:
+    workflows.argoproj.io/description: |
+      A weebill workflow that processes RAW SRA reads (downloaded with kingfisher),
+      but like the Logan workflow it takes MULTIPLE SRA accessions per pod invocation
+      and loops over them one at a time. Unlike prod_workflow_template4.yaml there is
+      no read chunking here - each accession is processed as a whole run.
+
+      Per accession, with no intermediate fastq written to disk:
+        kingfisher get                          -> $A.sra
+        sracat-rs --single-out singles.fifo ...  > pairs.fifo   (one writer, two FIFOs)
+        weebill sketch --merge --interleaved pairs.fifo --reads singles.fifo
+      sracat-rs streams interleaved paired reads to one FIFO and single/orphan reads
+      to the other; `weebill sketch --merge` sketches each FIFO on its own thread (so
+      both are drained concurrently and neither pipe deadlocks) and merges them into a
+      single compressed sample sketch (.sylspc). See the weebill_build_from_source
+      Dockerfile in cloud/docker for the image.
+
+      To avoid a single node being overwhelmed by many large SRA downloads running in
+      different pods at once, the pod requests ephemeral-storage proportional to the
+      combined size of the accessions it will download (ephemeral_storage_mb). The k8s
+      scheduler bin-packs pods by their resource requests, so a node whose disk is
+      already "full" of ephemeral-storage requests will not have more download-heavy
+      pods scheduled onto it. Because sracat-rs streams (no fastq temp files), the disk
+      footprint is essentially just the .sra file being processed.
+spec:
+  entrypoint: singlem
+
+  podGC:
+    # Pod GC strategy must be one of the following:
+    # * OnPodCompletion - delete pods immediately when pod is completed (including errors/failures)
+    # * OnPodSuccess - delete pods immediately when pod is successful
+    # * OnWorkflowCompletion - delete pods when workflow is completed
+    # * OnWorkflowSuccess - delete pods when workflow is successful
+    # Default: do not delete pods
+    strategy: OnPodSuccess
+    # The duration before pods in the GC queue get deleted. Defaults to 5s
+    # Requires Argo >= 3.5
+    deleteDelayDuration: 1h
+
+  templates:
+    - name: singlem
+      retryStrategy:
+        limit: "2"
+        retryPolicy: "Always"
+      inputs:
+        parameters:
+          - name: SRA_accession_num
+            value: '{{workflow.parameters.SRA_accession_num}}' # Space separated list of SRA accession numbers
+          - name: batch_name
+            value: '{{workflow.parameters.batch_name}}'
+          - name: ephemeral_storage_mb
+            # Requested local disk for this pod, in MiB. Should be >= the combined
+            # download+processing footprint of every accession in SRA_accession_num.
+            # Used purely as a scheduler constraint so nodes are not overloaded.
+            value: '{{workflow.parameters.ephemeral_storage_mb}}'
+      container:
+        image: public.ecr.aws/r8c0q0v5/woodcrob/weebill:latest
+        command: [bash,-c]
+        args: ["
+        echo workflow UID: {{workflow.uid}};
+        echo date: `date`;
+        mkdir -p logs sketches;
+        for A in {{inputs.parameters.SRA_accession_num}}; do A=$A bash -e -o pipefail -c '
+        echo processing $A on `date`;
+        kingfisher get -r $A --output-format-possibilities sra --guess-aws-location --hide-download-progress -m aws-http;
+        ls -lh $A.sra; free -h; df -h;
+        mkfifo $A.pairs.fifo $A.singles.fifo;
+        sracat-rs --single-out $A.singles.fifo $A.sra > $A.pairs.fifo &
+        sracat_pid=$!;
+        weebill sketch --merge --interleaved $A.pairs.fifo --reads $A.singles.fifo -S $A --compressed-database $A -t 4;
+        wait $sracat_pid;
+        mv $A.sylspc sketches/$A.sylspc;
+        rm -f $A.sra $A.pairs.fifo $A.singles.fifo;
+        echo passed $A;
+        find sketches/$A.sylspc -type f -empty -delete;
+        echo workflow UID: {{workflow.uid}};
+        ' 2>&1 | tee -a logs/$A.log;
+        done"
+        ]
+        resources:
+          requests:
+            memory: "4000Mi"
+            cpu: 4 # Whole-run processing like the Logan workflow; sketching is CPU bound.
+            # File-size based scheduling constraint - see the description above.
+            ephemeral-storage: '{{inputs.parameters.ephemeral_storage_mb}}Mi'
+      outputs:
+        artifacts:
+          - name: out-art
+            path: 'sketches'
+            archive: # do not tar.gz the file as argo does by default
+              none: {}
+            s3:
+              endpoint: s3.us-east-1.amazonaws.com
+              bucket: woodcrob-sandpiper-us-east-1
+              key: '{{workflow.parameters.batch_name}}/sketches/{{workflow.uid}}'
+              region: us-east-1
+              # The following fields are secret selectors.
+              # They reference the k8s secret named 'my-s3-credentials'.
+              # This secret is expected to have the keys 'accessKey' and 'secretKey',
+              # containing the base64 encoded credentials to the bucket.
+              accessKeySecret:
+                name: my-s3-credentials
+                key: accessKey
+              secretKeySecret:
+                name: my-s3-credentials
+                key: secretKey
+          - name: log-art
+            path: 'logs'
+            archive: # do not tar.gz the file as argo does by default
+              none: {}
+            s3:
+              endpoint: s3.us-east-1.amazonaws.com
+              bucket: woodcrob-sandpiper-us-east-1
+              key: '{{workflow.parameters.batch_name}}/logs/{{workflow.uid}}'
+              region: us-east-1
+              accessKeySecret:
+                name: my-s3-credentials
+                key: accessKey
+              secretKeySecret:
+                name: my-s3-credentials
+                key: secretKey
