@@ -27,8 +27,16 @@ metadata:
       cache (reference_s3_uri) shared by every pod on the node; the sketch step then
       preads only the blocks each sample needs from that local copy.
 
-      Per-accession failure isolation: a failed accession is recorded to a 'failures'
-      artifact and does not abort the pod, so its siblings' sketches still upload.
+      Spot-safe, resumable, per-accession outputs. Each sketch and log is uploaded to
+      S3 directly as the accession finishes, NOT via an end-of-pod Argo artifact - so a
+      spot interruption never loses already-completed sketches. At the top of the loop
+      the pod skips any accession whose .sylspr is already in S3, so an Argo retry (on
+      spot loss; retryPolicy Always) resumes at the interrupted accession instead of
+      redoing the whole pod. Outputs, all keyed per accession under {batch_name}/:
+        sketches/$A.sylspr   successful sketch
+        logs/$A.log          log for every accession attempted
+        failures/$A.log      copy of the log for accessions that failed (for diagnosis)
+      A failed accession does not abort the pod, so its siblings still complete.
 
       To avoid a single node being overwhelmed by many large SRA downloads running in
       different pods at once, the pod requests ephemeral-storage proportional to the
@@ -65,7 +73,10 @@ spec:
   templates:
     - name: singlem
       retryStrategy:
-        limit: "2"
+        # Always: retry on node-loss Errors (spot preemption), not just non-zero exits.
+        # Retries are cheap here because the pod skips accessions already uploaded to S3,
+        # so a higher limit just lets a repeatedly-preempted pod keep making progress.
+        limit: "5"
         retryPolicy: "Always"
       inputs:
         parameters:
@@ -131,14 +142,31 @@ spec:
           - name: ref-cache
             mountPath: /refcache
             readOnly: true
+        # S3 credentials for the per-accession uploads below (same secret the
+        # fetch-reference initContainer and the artifact system use).
+        env:
+          - name: AWS_DEFAULT_REGION
+            value: us-east-1
+          - name: AWS_ACCESS_KEY_ID
+            valueFrom:
+              secretKeyRef:
+                name: my-s3-credentials
+                key: accessKey
+          - name: AWS_SECRET_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: my-s3-credentials
+                key: secretKey
         command: [bash,-c]
         args: ["
         echo workflow UID: {{workflow.uid}};
         echo date: `date`;
         REF=/refcache/`basename {{inputs.parameters.reference_s3_uri}}`;
         ls -lh $REF;
+        S3=s3://woodcrob-sandpiper-us-east-1/{{inputs.parameters.batch_name}};
         mkdir -p logs sketches;
         for A in {{inputs.parameters.SRA_accession_num}}; do
+        if aws s3 ls $S3/sketches/$A.sylspr >/dev/null 2>&1; then echo skipping $A, already in S3; continue; fi;
         A=$A REF=$REF bash -e -o pipefail -c '
         echo processing $A on `date`;
         kingfisher get -r $A --output-format-possibilities sra --guess-aws-location --hide-download-progress -m aws-http;
@@ -150,11 +178,12 @@ spec:
         wait $sracat_pid;
         mv $A.sylspr sketches/$A.sylspr;
         echo passed $A;
-        ' 2>&1 | tee -a logs/$A.log;
+        ' 2>&1 | tee logs/$A.log;
         status=${PIPESTATUS[0]};
-        if [ $status -ne 0 ]; then echo FAILED $A exit $status | tee -a logs/$A.log; mkdir -p failures; echo $A >> failures/failed_accessions.txt; fi;
-        rm -f $A.sra $A.pairs.fifo $A.singles.fifo;
-        find sketches -type f -empty -delete;
+        if [ $status -ne 0 ]; then echo FAILED $A exit $status >> logs/$A.log; fi;
+        aws s3 cp logs/$A.log $S3/logs/$A.log --quiet;
+        if [ $status -eq 0 ]; then aws s3 cp sketches/$A.sylspr $S3/sketches/$A.sylspr --quiet; else aws s3 cp logs/$A.log $S3/failures/$A.log --quiet; fi;
+        rm -f $A.sra $A.pairs.fifo $A.singles.fifo sketches/$A.sylspr;
         echo workflow UID: {{workflow.uid}};
         done"
         ]
@@ -164,58 +193,6 @@ spec:
             cpu: 4 # Whole-run processing like the Logan workflow; sketching is CPU bound.
             # File-size based scheduling constraint - see the description above.
             ephemeral-storage: '{{inputs.parameters.ephemeral_storage_mb}}Mi'
-      outputs:
-        artifacts:
-          - name: out-art
-            path: 'sketches'
-            archive: # do not tar.gz the file as argo does by default
-              none: {}
-            s3:
-              endpoint: s3.us-east-1.amazonaws.com
-              bucket: woodcrob-sandpiper-us-east-1
-              key: '{{workflow.parameters.batch_name}}/sketches/{{workflow.uid}}'
-              region: us-east-1
-              # The following fields are secret selectors.
-              # They reference the k8s secret named 'my-s3-credentials'.
-              # This secret is expected to have the keys 'accessKey' and 'secretKey',
-              # containing the base64 encoded credentials to the bucket.
-              accessKeySecret:
-                name: my-s3-credentials
-                key: accessKey
-              secretKeySecret:
-                name: my-s3-credentials
-                key: secretKey
-          - name: log-art
-            path: 'logs'
-            archive: # do not tar.gz the file as argo does by default
-              none: {}
-            s3:
-              endpoint: s3.us-east-1.amazonaws.com
-              bucket: woodcrob-sandpiper-us-east-1
-              key: '{{workflow.parameters.batch_name}}/logs/{{workflow.uid}}'
-              region: us-east-1
-              accessKeySecret:
-                name: my-s3-credentials
-                key: accessKey
-              secretKeySecret:
-                name: my-s3-credentials
-                key: secretKey
-          - name: failures-art
-            # Per-accession failure isolation: a failed accession does not abort the
-            # pod (its siblings' sketches still upload); instead its name is recorded
-            # here. 'failures/' only exists when something failed, so this is optional.
-            path: 'failures'
-            optional: true
-            archive: # do not tar.gz the file as argo does by default
-              none: {}
-            s3:
-              endpoint: s3.us-east-1.amazonaws.com
-              bucket: woodcrob-sandpiper-us-east-1
-              key: '{{workflow.parameters.batch_name}}/failures/{{workflow.uid}}'
-              region: us-east-1
-              accessKeySecret:
-                name: my-s3-credentials
-                key: accessKey
-              secretKeySecret:
-                name: my-s3-credentials
-                key: secretKey
+      # No Argo output artifacts: each sketch/log is uploaded to S3 per accession
+      # inside the loop (see the container args), so completed work survives a spot
+      # interruption instead of only being uploaded on whole-pod success.
