@@ -157,6 +157,11 @@ spec:
               secretKeyRef:
                 name: my-s3-credentials
                 key: secretKey
+          # Let the AWS CLI retry transient S3 errors before we treat an upload as failed.
+          - name: AWS_RETRY_MODE
+            value: standard
+          - name: AWS_MAX_ATTEMPTS
+            value: "10"
         command: [bash,-c]
         args: ["
         echo workflow UID: {{workflow.uid}};
@@ -181,11 +186,16 @@ spec:
         ' 2>&1 | tee logs/$A.log;
         status=${PIPESTATUS[0]};
         if [ $status -ne 0 ]; then echo FAILED $A exit $status >> logs/$A.log; fi;
-        aws s3 cp logs/$A.log $S3/logs/$A.log --quiet;
-        if [ $status -eq 0 ]; then aws s3 cp sketches/$A.sylspr $S3/sketches/$A.sylspr --quiet; else aws s3 cp logs/$A.log $S3/failures/$A.log --quiet; fi;
-        rm -f $A.sra $A.pairs.fifo $A.singles.fifo sketches/$A.sylspr;
+        aws s3 cp logs/$A.log $S3/logs/$A.log --quiet || echo WARN log upload failed for $A;
+        if [ $status -eq 0 ]; then
+        if aws s3 cp sketches/$A.sylspr $S3/sketches/$A.sylspr --quiet; then rm -f sketches/$A.sylspr; else echo WARN sketch upload failed for $A - keeping local copy and will exit non-zero to trigger retry; upload_failed=1; fi;
+        else
+        aws s3 cp logs/$A.log $S3/failures/$A.log --quiet || echo WARN failure-log upload failed for $A;
+        fi;
+        rm -f $A.sra $A.pairs.fifo $A.singles.fifo;
         echo workflow UID: {{workflow.uid}};
-        done"
+        done;
+        if [ ${upload_failed:-0} -ne 0 ]; then echo one or more sketch uploads failed - exiting non-zero so Argo retries the pod, which resumes and skips already-uploaded accessions; exit 1; fi"
         ]
         resources:
           requests:
