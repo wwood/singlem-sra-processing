@@ -1,0 +1,3 @@
+pod_accessions,batch_name,ephemeral_storage_mb,pod_id,n_accessions,total_mbytes
+SRR36222975 SRR32600033 SRR36782522,multi_test5,5866,0,3,433
+SRR31284847 ERR16024520,multi_test5,5226,1,2,113
