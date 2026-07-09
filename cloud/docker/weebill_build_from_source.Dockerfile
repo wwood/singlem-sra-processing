@@ -33,15 +33,21 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # cloud/argo nodegroup templates, c7a.*), so native codegen targets the exact CPU
 # and is faster; it would only be unsafe if the image ran on an older CPU.
 
-# weebill (a sylph fork; installed binary is `weebill`). Pin to a commit for
-# reproducibility - bump WEEBILL_COMMIT to update.
-ENV WEEBILL_COMMIT main
-RUN git clone https://github.com/wwood/weebill /tmp/weebill \
+# weebill is developed as a branch of the sylph fork at github.com/wwood/sylph;
+# it builds a binary named `weebill` and provides `weebill sketch --merge`, which
+# this workflow depends on. NOTE: `main` (both bluenote-1577/sylph and the
+# wwood/weebill mirror) does NOT have `sketch --merge`, so pin the commit on the
+# add-merge-single-paired branch that does. (Mirrors sylph_build_from_source
+# .Dockerfile, which likewise builds from a wwood/sylph feature branch.)
+ENV WEEBILL_COMMIT c7f780947c762aebf82245557578ce9ff0ca413b
+RUN git clone https://github.com/wwood/sylph /tmp/weebill \
     && cd /tmp/weebill \
     && git checkout ${WEEBILL_COMMIT} \
     && RUSTFLAGS="-C target-cpu=native" cargo install --path . --root /usr/local \
     && rm -rf /tmp/weebill /root/.cargo/registry /root/.cargo/git
 RUN weebill --help
+# Fail the build early if this ref lacks `sketch --merge` (the workflow needs it).
+RUN weebill sketch --help | grep -q -- --merge
 
 # sracat-rs - built from source (not the prebuilt release) so it too gets
 # `-C target-cpu=native`. It links ncbi-vdb, a conda-provided C library, so the

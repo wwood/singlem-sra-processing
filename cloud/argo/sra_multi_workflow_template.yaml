@@ -122,7 +122,9 @@ spec:
             - |
               set -eo pipefail
               REF_URI='{{inputs.parameters.reference_s3_uri}}'
-              REF="/refcache/$(basename "$REF_URI")"
+              # Key the cache on a hash of the FULL URI, not just the basename, so two
+              # different references that share a filename cannot collide on this node.
+              REF="/refcache/$(printf %s "$REF_URI" | sha256sum | cut -c1-16).$(basename "$REF_URI")"
               mkdir -p /refcache
               # Serialise across pods that start on this node at the same time, so
               # the reference is downloaded once. flock is held for the whole block.
@@ -166,7 +168,7 @@ spec:
         args: ["
         echo workflow UID: {{workflow.uid}};
         echo date: `date`;
-        REF=/refcache/`basename {{inputs.parameters.reference_s3_uri}}`;
+        REF=/refcache/`printf %s {{inputs.parameters.reference_s3_uri}} | sha256sum | cut -c1-16`.`basename {{inputs.parameters.reference_s3_uri}}`;
         ls -lh $REF;
         S3=s3://woodcrob-sandpiper-us-east-1/{{inputs.parameters.batch_name}};
         mkdir -p logs sketches;
