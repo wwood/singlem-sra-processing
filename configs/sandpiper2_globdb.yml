@@ -1,0 +1,10 @@
+GTDB_VERSION: '11-GlobDB-R232'
+RENEWED_OUTPUT_BASE_DIRECTORY: '/scratch/microbiome/sandpiper2-globdb-renew'
+CONDENSED_DIRECTORY: '/scratch/microbiome/sandpiper2-globdb-renew/globdb_first_run'
+BASE_OUTPUT_DIRECTORY: '/scratch/microbiome/sandpiper2-globdb-renew/final_SRA'
+PREDICTOR_PREFIX: 'sandpiper2-globdb-r232-'
+METAPACKAGE_ARGUMENT: '--metapackage /work/microbiome/db/singlem/GlobDB_r232.metapackage_v4.smpkg'
+
+ACC_ORGANISM: '/work/microbiome/msingle/mess/220_sandpiper_R232/data/shotgun_sra_20260303.acc_organism.csv'
+TAXONOMY_JSON: '/work/microbiome/msingle/mess/220_sandpiper_R232/data/sra_taxonomy_table_20260303.json'
+SRA_NUM_BASES: '/work/microbiome/msingle/mess/220_sandpiper_R232/data/shotgun_sra_20260303.acc_num_bases.tsv'
