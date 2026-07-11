@@ -39,7 +39,8 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # wwood/weebill mirror) does NOT have `sketch --merge`, so pin the commit on the
 # add-merge-single-paired branch that does. (Mirrors sylph_build_from_source
 # .Dockerfile, which likewise builds from a wwood/sylph feature branch.)
-ENV WEEBILL_COMMIT c7f780947c762aebf82245557578ce9ff0ca413b
+RUN echo build from here
+ENV WEEBILL_COMMIT main
 RUN git clone https://github.com/wwood/sylph /tmp/weebill \
     && cd /tmp/weebill \
     && git checkout ${WEEBILL_COMMIT} \
@@ -95,8 +96,8 @@ RUN cd /tmp && wget "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -
 RUN cd /tmp && kingfisher get -r SRR8653040 -m aws-http -f sra --guess-aws-location --hide-download-progress
 RUN cd /tmp && bash -e -o pipefail -c '\
     mkfifo pairs.fifo singles.fifo; \
-    sracat-rs --single-out singles.fifo SRR8653040.sra > pairs.fifo & \
-    weebill sketch --merge --interleaved pairs.fifo --reads singles.fifo -S SRR8653040 --compressed-database /tmp/SRR8653040 -t 4; \
+    sracat-rs --eager-open-output --single-out singles.fifo SRR8653040.sra > pairs.fifo & \
+    weebill sketch --merge --tolerate-empty-inputs --interleaved pairs.fifo --reads singles.fifo -S SRR8653040 --compressed-database /tmp/SRR8653040 -t 1; \
     wait; \
     ls -lh /tmp/SRR8653040.sylspc' \
     && rm -f /tmp/SRR8653040* /tmp/pairs.fifo /tmp/singles.fifo
