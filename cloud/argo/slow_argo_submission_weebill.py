@@ -20,9 +20,9 @@
 ###############################################################################
 
 # Throttled Argo submission for the multi-SRA-per-pod weebill workflow
-# (sra_multi_workflow_template.yaml). Each row of the input CSV is one pod that
+# (sra_weebill_workflow_template.yaml). Each row of the input CSV is one pod that
 # loops over several whole SRA runs. This is the multi-accession sibling of
-# slow_argo_submission_chunked.py; see sra_multi_batch_creation.ipynb for how
+# slow_argo_submission_chunked.py; see sra_weebill_batch_creation.ipynb for how
 # the CSV is built.
 
 __author__ = "Ben Woodcroft"
