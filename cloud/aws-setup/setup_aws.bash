@@ -22,19 +22,29 @@
 #
 # A handful of steps in the original manual runbook were done via the AWS
 # console (creating the EC2 master instance, pushing the docker image, and
-# creating the S3 bucket). Those are checked for / created here where it is
-# safe to automate, and otherwise reported as prerequisites.
+# creating the S3 bucket). The EC2 master instance and the S3 bucket are now
+# created programmatically here (Steps 3 and 5); the docker image is still a
+# prerequisite and is only verified to exist.
 #
 # Usage:
-#   ./setup_weebill.bash \
-#       --workflow-template cloud/argo/logan_workflow_template.yaml \
-#       --ecr-image 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v3
+#   ./setup_aws.bash \
+#       --workflow-template cloud/argo/sra_weebill_workflow_template.yaml \
+#       --ecr-image 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v2
 #
-#   SKIP_CLUSTER_CREATE=1 ./setup_weebill.bash ...   # skip cluster creation on re-runs
+#   SKIP_CLUSTER_CREATE=1 ./setup_aws.bash ...        # skip cluster creation on re-runs
+#   ./setup_aws.bash --start-step 7 ...               # resume, running from Step 7 onward
+#   SKIP_MASTER_INSTANCE=1 ./setup_aws.bash ...       # don't create the EC2 master node
+#
+# See the "How to run this for the weebill workflow" block printed by
+# `./setup_aws.bash --help` for the exact weebill invocation.
 #
 # --workflow-template and --ecr-image are REQUIRED: the workflow template and
 # the image it runs must be chosen explicitly and kept consistent with each
 # other (the template runs the image you pass via --ecr-image).
+#
+# Steps are numbered (1, 2, 3, 5, 6, 7, 8, 9, 10, 11). --start-step N runs every
+# step numbered >= N and skips the earlier ones, so a failed run can be resumed
+# without repeating the (slow) cluster creation. The pre-flight checks always run.
 #
 set -euo pipefail
 
@@ -52,7 +62,7 @@ Required arguments:
   --ecr-image <uri>           Container image URI the workflow runs; verified to
                               exist in ECR. Must match the image the template
                               runs (e.g.
-                              656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v3).
+                              656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v2).
 
 Options (defaults shown; may also be set via the matching environment variable):
   --region <r>                AWS region (us-east-1)
@@ -66,7 +76,29 @@ Options (defaults shown; may also be set via the matching environment variable):
                               for templates needing extra parameters, e.g.
                               --test-parameter batch_name=smoke
                               --test-parameter reference_s3_uri=s3://...
+  --start-step <N>            Run every step numbered >= N (skip earlier steps).
+                              Steps: 1,2,3,5,6,7,8,9,10,11. Default 1 (all steps).
+  --master-instance-type <t>  EC2 type for the master node (t2.medium)
+  --master-key-name <k>       EC2 key pair name for the master node (woodcrob1)
+  --skip-master-instance      Do not create the EC2 master node (Step 3)
   -h, --help                  Show this help and exit
+
+Environment-only knobs for the master node (Step 3):
+  MASTER_INSTANCE_NAME (sandpiper-master2), MASTER_ROLE_NAME (sandpiper-master-admin),
+  MASTER_AMI (auto: latest Ubuntu 22.04), MASTER_VOLUME_SIZE_GB (20),
+  MASTER_SECURITY_GROUP (sandpiper-master-ssh), MASTER_SSH_CIDR (0.0.0.0/0).
+
+How to run this for the weebill workflow (cloud/argo/):
+  ./setup_aws.bash \\
+      --workflow-template cloud/argo/sra_weebill_workflow_template.yaml \\
+      --ecr-image 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v2 \\
+      --test-parameter SRA_accession_num=SRR8653040 \\
+      --test-parameter batch_name=smoke-test \\
+      --test-parameter ephemeral_storage_mb=20000 \\
+      --test-parameter reference_s3_uri=s3://woodcrob-sandpiper-us-east-1/references/weebill/gtdb.sylref
+  The weebill template needs all four parameters above (see
+  sra_weebill_workflow_template.yaml). Bulk submission afterwards is driven by
+  cloud/argo/slow_argo_submission_weebill.py (printed again at the end).
 EOF
 }
 
@@ -90,6 +122,20 @@ IO_NODEGROUP_MAX="${IO_NODEGROUP_MAX:-100}"
 TEST_SRA_ACCESSION="${TEST_SRA_ACCESSION:-SRR8653040}"
 NODEGROUP_TEMPLATE="${NODEGROUP_TEMPLATE:-}"
 
+# Step 3 EC2 master node. Created programmatically (was previously a manual
+# console step). Set SKIP_MASTER_INSTANCE=1 to skip it entirely.
+START_STEP="${START_STEP:-1}"
+SKIP_MASTER_INSTANCE="${SKIP_MASTER_INSTANCE:-0}"
+MASTER_INSTANCE_NAME="${MASTER_INSTANCE_NAME:-sandpiper-master2}"
+MASTER_INSTANCE_TYPE="${MASTER_INSTANCE_TYPE:-t2.medium}"
+MASTER_VOLUME_SIZE_GB="${MASTER_VOLUME_SIZE_GB:-20}"
+MASTER_KEY_NAME="${MASTER_KEY_NAME:-woodcrob1}"
+MASTER_ROLE_NAME="${MASTER_ROLE_NAME:-sandpiper-master-admin}"
+MASTER_SECURITY_GROUP="${MASTER_SECURITY_GROUP:-sandpiper-master-ssh}"
+MASTER_SSH_CIDR="${MASTER_SSH_CIDR:-0.0.0.0/0}"
+MASTER_AMI="${MASTER_AMI:-}"       # empty => look up latest Ubuntu 22.04 via SSM
+MASTER_REPO_URL="${MASTER_REPO_URL:-https://github.com/wwood/singlem-sra-processing/}"
+
 # Required arguments (no defaults) - must be supplied on the command line.
 WORKFLOW_TEMPLATE="${WORKFLOW_TEMPLATE:-}"
 ECR_IMAGE="${ECR_IMAGE:-}"
@@ -112,6 +158,10 @@ while [[ $# -gt 0 ]]; do
     --nodegroup-template) NODEGROUP_TEMPLATE="${2:?--nodegroup-template needs a value}"; shift 2 ;;
     --test-accession)     TEST_SRA_ACCESSION="${2:?--test-accession needs a value}"; shift 2 ;;
     --test-parameter)     TEST_PARAMETERS+=("${2:?--test-parameter needs KEY=VALUE}"); shift 2 ;;
+    --start-step)         START_STEP="${2:?--start-step needs a value}"; shift 2 ;;
+    --master-instance-type) MASTER_INSTANCE_TYPE="${2:?--master-instance-type needs a value}"; shift 2 ;;
+    --master-key-name)    MASTER_KEY_NAME="${2:?--master-key-name needs a value}"; shift 2 ;;
+    --skip-master-instance) SKIP_MASTER_INSTANCE=1; shift ;;
     -h|--help)            usage; exit 0 ;;
     *) usage; die "Unknown argument: $1" ;;
   esac
@@ -120,6 +170,11 @@ done
 # Enforce the required arguments.
 [[ -n "${WORKFLOW_TEMPLATE}" ]] || { usage; die "Missing required argument: --workflow-template"; }
 [[ -n "${ECR_IMAGE}" ]]         || { usage; die "Missing required argument: --ecr-image"; }
+
+# --start-step must be a positive integer. Steps numbered >= START_STEP run.
+[[ "${START_STEP}" =~ ^[0-9]+$ ]] || { usage; die "--start-step must be a number, got '${START_STEP}'"; }
+# True when the given step number should run under the current --start-step.
+step_enabled() { [[ "$1" -ge "${START_STEP}" ]]; }
 
 # Default the smoke-test parameters to just the SRA accession if none were
 # supplied. --test-parameter values, when given, fully replace this default.
@@ -161,14 +216,19 @@ if [[ "$(uname -m)" == "arm64" || "$(uname -m)" == "aarch64" ]]; then
   ARCH="arm64"
 fi
 log "Detected OS=${OS} ARCH=${ARCH}, region=${REGION}, cluster=${CLUSTER_NAME}"
+log "Running steps numbered >= ${START_STEP}"
+
+# Scratch dir used by several steps (CLI downloads, rendered policy/nodegroup,
+# master-node user-data). Created unconditionally so steps still work when
+# earlier steps are skipped via --start-step.
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "${WORKDIR}"' EXIT
 
 ###############################################################################
 # Step 1. Update eksctl, kubectl (and argo) on the local computer
 ###############################################################################
+if step_enabled 1; then
 log "Step 1: Updating local eksctl, kubectl and argo CLIs"
-
-WORKDIR="$(mktemp -d)"
-trap 'rm -rf "${WORKDIR}"' EXIT
 
 # --- kubectl ---
 log "Installing/updating kubectl"
@@ -202,10 +262,12 @@ gunzip -f "${WORKDIR}/argo.gz"
 chmod +x "${WORKDIR}/argo"
 sudo mv "${WORKDIR}/argo" /usr/local/bin/argo
 argo version
+fi  # end Step 1
 
 ###############################################################################
 # Step 2. Docker image (already pushed)
 ###############################################################################
+if step_enabled 2; then
 log "Step 2: Docker image (prerequisite, already pushed)"
 echo "Using image: ${ECR_IMAGE}"
 # Verify the image exists when it is a private ECR image (<account>.dkr.ecr.
@@ -225,25 +287,146 @@ if [[ "${ECR_IMAGE}" =~ ^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/ ]]; then
 else
   echo "Image is not a private ECR URI; skipping ECR existence check."
 fi
+fi  # end Step 2
 
 ###############################################################################
-# Step 3. EC2 master instance (prerequisite)
+# Step 3. EC2 master instance (created programmatically)
 ###############################################################################
-log "Step 3: EC2 master instance (prerequisite, created via the console)"
-cat <<'EOF'
-This step is done manually via the AWS console:
-  - Instance:   sandpiper-master2 (admin/instance profile), t2.medium, 20 GB disk
-  - Login:      ssh -i ~/.ssh/woodcrob1.pem ubuntu@<master-public-dns>
-  - On master:  git clone https://github.com/wwood/singlem-sra-processing/
-                cd singlem-sra-processing/cloud/argo
-                ./master_node_setup.sh
-This script instead drives the cluster from this desktop, so the master node
-is optional. Skipping.
+# Previously a manual AWS-console step. Now provisioned with the AWS CLI: a
+# ${MASTER_INSTANCE_TYPE} node (default t2.medium, ${MASTER_VOLUME_SIZE_GB} GB
+# disk) with an admin instance profile, tagged Name=${MASTER_INSTANCE_NAME}. It
+# bootstraps itself via user-data: clone the repo and run master_node_setup.sh.
+# Idempotent: an existing non-terminated instance with that Name tag is reused.
+if step_enabled 3; then
+if [[ "${SKIP_MASTER_INSTANCE}" == "1" ]]; then
+  warn "SKIP_MASTER_INSTANCE=1 set; skipping EC2 master instance creation (Step 3)."
+else
+  log "Step 3: Provisioning EC2 master instance ${MASTER_INSTANCE_NAME} (${MASTER_INSTANCE_TYPE})"
+
+  # Reuse an existing (non-terminated) instance with the same Name tag.
+  EXISTING_MASTER_ID="$(aws ec2 describe-instances --region "${REGION}" \
+    --filters "Name=tag:Name,Values=${MASTER_INSTANCE_NAME}" \
+              "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+    --query 'Reservations[].Instances[].InstanceId | [0]' --output text 2>/dev/null || true)"
+
+  if [[ -n "${EXISTING_MASTER_ID}" && "${EXISTING_MASTER_ID}" != "None" ]]; then
+    warn "Master instance ${MASTER_INSTANCE_NAME} already exists (${EXISTING_MASTER_ID}); reusing it."
+    MASTER_INSTANCE_ID="${EXISTING_MASTER_ID}"
+  else
+    # Key pair must already exist (we can't recreate the private key material).
+    aws ec2 describe-key-pairs --region "${REGION}" --key-names "${MASTER_KEY_NAME}" >/dev/null 2>&1 \
+      || die "EC2 key pair '${MASTER_KEY_NAME}' not found in ${REGION}. Create it (or pass --master-key-name), e.g. aws ec2 create-key-pair --key-name ${MASTER_KEY_NAME} --query KeyMaterial --output text > ~/.ssh/${MASTER_KEY_NAME}.pem"
+
+    # Admin IAM role + instance profile (idempotent, each piece checked).
+    log "Ensuring admin instance profile ${MASTER_ROLE_NAME}"
+    if ! aws iam get-role --role-name "${MASTER_ROLE_NAME}" >/dev/null 2>&1; then
+      aws iam create-role --role-name "${MASTER_ROLE_NAME}" \
+        --assume-role-policy-document '{
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "ec2.amazonaws.com"},
+            "Action": "sts:AssumeRole"
+          }]
+        }' >/dev/null
+    fi
+    aws iam attach-role-policy --role-name "${MASTER_ROLE_NAME}" \
+      --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+    if ! aws iam get-instance-profile --instance-profile-name "${MASTER_ROLE_NAME}" >/dev/null 2>&1; then
+      aws iam create-instance-profile --instance-profile-name "${MASTER_ROLE_NAME}" >/dev/null
+    fi
+    # Add the role to the profile if it isn't already attached.
+    if ! aws iam get-instance-profile --instance-profile-name "${MASTER_ROLE_NAME}" \
+          --query 'InstanceProfile.Roles[].RoleName' --output text 2>/dev/null \
+          | grep -qw "${MASTER_ROLE_NAME}"; then
+      aws iam add-role-to-instance-profile \
+        --instance-profile-name "${MASTER_ROLE_NAME}" --role-name "${MASTER_ROLE_NAME}"
+      # Give IAM a moment to propagate before run-instances references the profile.
+      sleep 10
+    fi
+
+    # Security group in the default VPC allowing inbound SSH from MASTER_SSH_CIDR.
+    VPC_ID="$(aws ec2 describe-vpcs --region "${REGION}" \
+      --filters Name=isDefault,Values=true \
+      --query 'Vpcs[0].VpcId' --output text)"
+    [[ -n "${VPC_ID}" && "${VPC_ID}" != "None" ]] \
+      || die "No default VPC in ${REGION}; set MASTER_SECURITY_GROUP to an existing SG's setup or create a default VPC."
+    SG_ID="$(aws ec2 describe-security-groups --region "${REGION}" \
+      --filters "Name=group-name,Values=${MASTER_SECURITY_GROUP}" "Name=vpc-id,Values=${VPC_ID}" \
+      --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)"
+    if [[ -z "${SG_ID}" || "${SG_ID}" == "None" ]]; then
+      log "Creating security group ${MASTER_SECURITY_GROUP} (SSH from ${MASTER_SSH_CIDR})"
+      SG_ID="$(aws ec2 create-security-group --region "${REGION}" \
+        --group-name "${MASTER_SECURITY_GROUP}" \
+        --description "SSH access to the sandpiper master node" \
+        --vpc-id "${VPC_ID}" --query 'GroupId' --output text)"
+      aws ec2 authorize-security-group-ingress --region "${REGION}" \
+        --group-id "${SG_ID}" --protocol tcp --port 22 --cidr "${MASTER_SSH_CIDR}" >/dev/null
+    fi
+
+    # Resolve the AMI (latest Ubuntu 22.04) unless one was provided.
+    if [[ -z "${MASTER_AMI}" ]]; then
+      log "Looking up latest Ubuntu 22.04 AMI in ${REGION}"
+      MASTER_AMI="$(aws ssm get-parameter --region "${REGION}" \
+        --name /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp3/ami-id \
+        --query 'Parameter.Value' --output text 2>/dev/null || true)"
+      if [[ -z "${MASTER_AMI}" || "${MASTER_AMI}" == "None" ]]; then
+        MASTER_AMI="$(aws ssm get-parameter --region "${REGION}" \
+          --name /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id \
+          --query 'Parameter.Value' --output text)"
+      fi
+    fi
+    [[ -n "${MASTER_AMI}" && "${MASTER_AMI}" != "None" ]] || die "Could not resolve an Ubuntu AMI; set MASTER_AMI explicitly."
+    echo "Using AMI ${MASTER_AMI}"
+
+    # User-data: clone the repo and run master_node_setup.sh as the ubuntu user,
+    # so the node comes up fully provisioned without a manual SSH session.
+    USERDATA="${WORKDIR}/master-userdata.sh"
+    cat > "${USERDATA}" <<EOF
+#!/bin/bash
+exec > /var/log/sandpiper-master-setup.log 2>&1
+set -x
+apt-get update -y
+apt-get install -y git
+sudo -u ubuntu -H bash -c '
+  cd /home/ubuntu
+  git clone ${MASTER_REPO_URL} singlem-sra-processing || (cd singlem-sra-processing && git pull)
+  cd /home/ubuntu/singlem-sra-processing/cloud/argo
+  ./master_node_setup.sh
+'
 EOF
+
+    log "Launching EC2 instance"
+    MASTER_INSTANCE_ID="$(aws ec2 run-instances --region "${REGION}" \
+      --image-id "${MASTER_AMI}" \
+      --instance-type "${MASTER_INSTANCE_TYPE}" \
+      --key-name "${MASTER_KEY_NAME}" \
+      --iam-instance-profile "Name=${MASTER_ROLE_NAME}" \
+      --security-group-ids "${SG_ID}" \
+      --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=${MASTER_VOLUME_SIZE_GB},VolumeType=gp3}" \
+      --user-data "file://${USERDATA}" \
+      --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${MASTER_INSTANCE_NAME}}]" \
+      --query 'Instances[0].InstanceId' --output text)"
+    echo "Launched ${MASTER_INSTANCE_ID}; waiting for it to reach 'running'..."
+    aws ec2 wait instance-running --region "${REGION}" --instance-ids "${MASTER_INSTANCE_ID}"
+  fi
+
+  MASTER_PUBLIC_DNS="$(aws ec2 describe-instances --region "${REGION}" \
+    --instance-ids "${MASTER_INSTANCE_ID}" \
+    --query 'Reservations[0].Instances[0].PublicDnsName' --output text)"
+  cat <<EOF
+Master instance ready: ${MASTER_INSTANCE_ID} (${MASTER_PUBLIC_DNS:-no public DNS})
+  ssh -i ~/.ssh/${MASTER_KEY_NAME}.pem ubuntu@${MASTER_PUBLIC_DNS}
+The node bootstraps via user-data (clone + master_node_setup.sh); follow it with:
+  ssh ... 'tail -f /var/log/sandpiper-master-setup.log'
+EOF
+fi
+fi  # end Step 3
 
 ###############################################################################
 # Step 5. S3 bucket
 ###############################################################################
+if step_enabled 5; then
 log "Step 5: Ensuring S3 bucket ${BUCKET} exists in ${REGION}"
 if aws s3api head-bucket --bucket "${BUCKET}" >/dev/null 2>&1; then
   echo "Bucket ${BUCKET} already exists."
@@ -257,15 +440,19 @@ else
       --create-bucket-configuration LocationConstraint="${REGION}"
   fi
 fi
+fi  # end Step 5
 
 ###############################################################################
 # Step 6. Argo submission template (already present in repo)
 ###############################################################################
+if step_enabled 6; then
 log "Step 6: Using Argo workflow template ${WORKFLOW_TEMPLATE}"
+fi  # end Step 6
 
 ###############################################################################
 # Step 7. Create the EKS cluster and install Argo
 ###############################################################################
+if step_enabled 7; then
 if [[ "${SKIP_CLUSTER_CREATE:-0}" == "1" ]]; then
   warn "SKIP_CLUSTER_CREATE=1 set; skipping cluster creation."
 else
@@ -302,6 +489,15 @@ log "Waiting briefly for the Argo workflow-controller Deployment"
 # abort the rest of the (node-independent) setup while waiting for capacity.
 kubectl -n "${ARGO_NAMESPACE}" rollout status deploy/workflow-controller --timeout=120s \
   || warn "workflow-controller not Available yet - it needs worker capacity. Scale up a nodegroup (Steps 11/14) and it will start. Continuing setup."
+fi  # end Step 7
+
+# When resuming past cluster creation (--start-step > 7), Step 7 above did not
+# run, so make sure this desktop's kubeconfig points at the cluster before the
+# kubectl/argo steps below.
+if ! step_enabled 7 && [[ "${START_STEP}" -le 11 ]]; then
+  log "Ensuring kubeconfig for ${CLUSTER_NAME} (Step 7 skipped)"
+  aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${REGION}"
+fi
 
 ###############################################################################
 # Step 8. Submit a test (hello-world) Argo job
@@ -309,13 +505,16 @@ kubectl -n "${ARGO_NAMESPACE}" rollout status deploy/workflow-controller --timeo
 # Submitted without --watch: with 0 nodes the pod stays Pending until you scale
 # up a nodegroup, and --watch would block the script indefinitely. The workflow
 # is created now and the controller runs it once worker capacity exists.
+if step_enabled 8; then
 log "Step 8: Submitting hello-world test workflow (runs once worker capacity exists)"
 argo submit -n "${ARGO_NAMESPACE}" \
   https://raw.githubusercontent.com/argoproj/argo-workflows/main/examples/hello-world.yaml
+fi  # end Step 8
 
 ###############################################################################
 # Step 9. Set up S3 permissions (IAM user + access key + k8s secret)
 ###############################################################################
+if step_enabled 9; then
 log "Step 9: Setting up S3 IAM user and Kubernetes credentials secret"
 
 S3_USER="${BUCKET}-user"
@@ -375,12 +574,14 @@ else
     --namespace "${ARGO_NAMESPACE}"
   echo "Stored access key in ${ACCESS_KEY_FILE} (keep this safe / out of git)."
 fi
+fi  # end Step 9
 
 ###############################################################################
 # Step 10. Submit a real job using the workflow template
 ###############################################################################
 # Submitted without --watch for the same reason as Step 8: the job stays
 # Pending until a nodegroup is scaled up, and --watch would block indefinitely.
+if step_enabled 10; then
 log "Step 10: Submitting test job with the workflow template (runs once worker capacity exists)"
 echo "Parameters: ${TEST_PARAMETERS[*]}"
 PARAM_ARGS=()
@@ -390,10 +591,12 @@ done
 argo submit -n "${ARGO_NAMESPACE}" \
   "${PARAM_ARGS[@]}" \
   "${WORKFLOW_TEMPLATE}"
+fi  # end Step 10
 
 ###############################################################################
 # Step 11. Scale-up setup: IO-optimised nodegroup + controller parallelism
 ###############################################################################
+if step_enabled 11; then
 log "Step 11a: Replacing the bootstrap nodegroup with an IO-optimised one"
 
 # Delete any nodegroups eksctl auto-provisioned at cluster creation so that
@@ -474,10 +677,31 @@ kubectl -n "${ARGO_NAMESPACE}" rollout restart deploy/workflow-controller
 # exists (this cluster is scaled up manually - see Steps 11/14).
 kubectl -n "${ARGO_NAMESPACE}" rollout status deploy/workflow-controller --timeout=120s \
   || warn "workflow-controller restart not Available yet - scale up a nodegroup (Step 14) to provide capacity."
+fi  # end Step 11
 
 ###############################################################################
 # Steps 12-14. Production submission, monitoring and scaling (informational)
 ###############################################################################
+# Tailor the bulk-submission hint to the chosen workflow template. The weebill
+# template is driven by slow_argo_submission_weebill.py (CSV input + a shared
+# reference .sylref URI); other templates use slow_argo_submission.py.
+if [[ "$(basename "${WORKFLOW_TEMPLATE}")" == *weebill* ]]; then
+  BULK_SUBMISSION_HELP="./slow_argo_submission_weebill.py \\
+        --input-runlist-csv <pods.csv> \\
+        --workflow-template ${WORKFLOW_TEMPLATE} \\
+        --reference-s3-uri s3://${BUCKET}/references/weebill/gtdb.sylref \\
+        --min-running-pending-file min_job_count \\
+        --batch-size-file batch_size
+      (build <pods.csv> with sra_weebill_batch_creation.ipynb; columns
+       pod_accessions, batch_name, ephemeral_storage_mb)"
+else
+  BULK_SUBMISSION_HELP="./slow_argo_submission.py \\
+        --input-runlist <runlist.txt> \\
+        --workflow-template ${WORKFLOW_TEMPLATE} \\
+        --min-running-pending-file min_job_count \\
+        --batch-size-file batch_size"
+fi
+
 log "Setup complete. Next steps (run manually as needed):"
 cat <<EOF
 
@@ -488,11 +712,7 @@ scale a nodegroup up. Do that first (Step 14 below), then watch them, e.g.:
       argo get  -n ${ARGO_NAMESPACE} @latest
 
 12. Bulk submission (slow, rate-limited) from ${ARGO_DIR}:
-      ./slow_argo_submission.py \\
-        --input-runlist <runlist.txt> \\
-        --workflow-template ${WORKFLOW_TEMPLATE} \\
-        --min-running-pending-file min_job_count \\
-        --batch-size-file batch_size
+      ${BULK_SUBMISSION_HELP}
 
 13. Monitoring:
       k9s
