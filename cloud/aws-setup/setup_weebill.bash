@@ -13,6 +13,13 @@
 # The script fails fast: any error, unset variable or failing pipe stage
 # aborts execution immediately.
 #
+# Capacity is provisioned MANUALLY: the cluster starts with 0 worker nodes and
+# the nodegroup is created with desiredCapacity 0. The Argo controller and the
+# test workflows submitted here stay Pending until you scale a nodegroup up
+# (see the Step 14 command printed at the end). The controller rollout waits
+# are therefore non-fatal, and the test jobs are submitted without --watch so
+# the script never blocks on missing capacity.
+#
 # A handful of steps in the original manual runbook were done via the AWS
 # console (creating the EC2 master instance, pushing the docker image, and
 # creating the S3 bucket). Those are checked for / created here where it is
@@ -288,14 +295,22 @@ kubectl get namespace "${ARGO_NAMESPACE}" >/dev/null 2>&1 \
 kubectl apply -n "${ARGO_NAMESPACE}" \
   -f "https://github.com/argoproj/argo-workflows/releases/download/${ARGO_WORKFLOWS_VERSION}/quick-start-minimal.yaml"
 
-log "Waiting for the Argo workflow-controller to become available"
-kubectl -n "${ARGO_NAMESPACE}" rollout status deploy/workflow-controller --timeout=300s
+log "Waiting briefly for the Argo workflow-controller Deployment"
+# NOTE: this cluster starts with 0 worker nodes and is scaled up MANUALLY
+# (see Steps 11/14). The controller pod - like every workflow pod - needs a
+# worker node, so it may stay Pending until you scale a nodegroup up. Don't
+# abort the rest of the (node-independent) setup while waiting for capacity.
+kubectl -n "${ARGO_NAMESPACE}" rollout status deploy/workflow-controller --timeout=120s \
+  || warn "workflow-controller not Available yet - it needs worker capacity. Scale up a nodegroup (Steps 11/14) and it will start. Continuing setup."
 
 ###############################################################################
 # Step 8. Submit a test (hello-world) Argo job
 ###############################################################################
-log "Step 8: Submitting hello-world test workflow"
-argo submit -n "${ARGO_NAMESPACE}" --watch \
+# Submitted without --watch: with 0 nodes the pod stays Pending until you scale
+# up a nodegroup, and --watch would block the script indefinitely. The workflow
+# is created now and the controller runs it once worker capacity exists.
+log "Step 8: Submitting hello-world test workflow (runs once worker capacity exists)"
+argo submit -n "${ARGO_NAMESPACE}" \
   https://raw.githubusercontent.com/argoproj/argo-workflows/main/examples/hello-world.yaml
 
 ###############################################################################
@@ -364,7 +379,9 @@ fi
 ###############################################################################
 # Step 10. Submit a real job using the workflow template
 ###############################################################################
-log "Step 10: Submitting test job with the workflow template"
+# Submitted without --watch for the same reason as Step 8: the job stays
+# Pending until a nodegroup is scaled up, and --watch would block indefinitely.
+log "Step 10: Submitting test job with the workflow template (runs once worker capacity exists)"
 echo "Parameters: ${TEST_PARAMETERS[*]}"
 PARAM_ARGS=()
 for p in "${TEST_PARAMETERS[@]}"; do
@@ -372,7 +389,7 @@ for p in "${TEST_PARAMETERS[@]}"; do
 done
 argo submit -n "${ARGO_NAMESPACE}" \
   "${PARAM_ARGS[@]}" \
-  "${WORKFLOW_TEMPLATE}" --watch
+  "${WORKFLOW_TEMPLATE}"
 
 ###############################################################################
 # Step 11. Scale-up setup: IO-optimised nodegroup + controller parallelism
@@ -453,13 +470,22 @@ kubectl patch configmap workflow-controller-configmap \
 
 log "Restarting the Argo workflow-controller to pick up the new config"
 kubectl -n "${ARGO_NAMESPACE}" rollout restart deploy/workflow-controller
-kubectl -n "${ARGO_NAMESPACE}" rollout status  deploy/workflow-controller --timeout=300s
+# Non-fatal: like the initial rollout, this only completes once worker capacity
+# exists (this cluster is scaled up manually - see Steps 11/14).
+kubectl -n "${ARGO_NAMESPACE}" rollout status deploy/workflow-controller --timeout=120s \
+  || warn "workflow-controller restart not Available yet - scale up a nodegroup (Step 14) to provide capacity."
 
 ###############################################################################
 # Steps 12-14. Production submission, monitoring and scaling (informational)
 ###############################################################################
 log "Setup complete. Next steps (run manually as needed):"
 cat <<EOF
+
+IMPORTANT: this cluster has 0 worker nodes right now. The Argo controller and
+the two test workflows just submitted (Steps 8 & 10) stay Pending until you
+scale a nodegroup up. Do that first (Step 14 below), then watch them, e.g.:
+      argo list -n ${ARGO_NAMESPACE}
+      argo get  -n ${ARGO_NAMESPACE} @latest
 
 12. Bulk submission (slow, rate-limited) from ${ARGO_DIR}:
       ./slow_argo_submission.py \\
