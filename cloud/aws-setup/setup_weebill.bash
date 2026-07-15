@@ -290,28 +290,47 @@ argo submit -n "${ARGO_NAMESPACE}" \
 log "Step 11a: Replacing the bootstrap nodegroup with an IO-optimised one"
 
 # Delete any nodegroups eksctl auto-provisioned at cluster creation so that
-# only the IO-optimised nodegroup remains.
+# only the IO-optimised nodegroup remains. The IO nodegroup itself
+# (${IO_NODEGROUP_NAME}) is explicitly preserved so that re-runs (e.g. with
+# SKIP_CLUSTER_CREATE=1) do not drain/evict active workflows or tear down
+# production capacity created on a previous run.
 log "Deleting bootstrap nodegroup(s) created during cluster launch"
-BOOTSTRAP_NGS="$(eksctl get nodegroup --cluster "${CLUSTER_NAME}" --region "${REGION}" -o json \
+EXISTING_NGS="$(eksctl get nodegroup --cluster "${CLUSTER_NAME}" --region "${REGION}" -o json \
   | jq -r '.[].Name' || true)"
-if [[ -n "${BOOTSTRAP_NGS}" ]]; then
+if [[ -n "${EXISTING_NGS}" ]]; then
   while IFS= read -r ng; do
     [[ -z "${ng}" ]] && continue
-    echo "Deleting nodegroup ${ng}..."
+    if [[ "${ng}" == "${IO_NODEGROUP_NAME}" ]]; then
+      echo "Keeping existing IO nodegroup ${ng} (not deleting)."
+      continue
+    fi
+    echo "Deleting bootstrap nodegroup ${ng}..."
     eksctl delete nodegroup \
       --cluster "${CLUSTER_NAME}" --region "${REGION}" \
       --name "${ng}" --wait
-  done <<< "${BOOTSTRAP_NGS}"
+  done <<< "${EXISTING_NGS}"
 else
   echo "No existing nodegroups found to delete."
 fi
 
-log "Creating IO-optimised nodegroup from ${NODEGROUP_TEMPLATE}"
-# The template's metadata.name must match this cluster; patch it on the fly so
-# the shipped template works against ${CLUSTER_NAME} without manual edits.
-PATCHED_NODEGROUP="${WORKDIR}/nodegroup.yaml"
-# Regenerate the header so metadata.name/region match this cluster...
-cat > "${PATCHED_NODEGROUP}" <<EOF
+# If the IO nodegroup already exists (a re-run), skip re-creating it.
+if echo "${EXISTING_NGS}" | grep -qx "${IO_NODEGROUP_NAME}"; then
+  warn "IO nodegroup ${IO_NODEGROUP_NAME} already exists; skipping creation."
+  IO_NODEGROUP_EXISTS=1
+else
+  IO_NODEGROUP_EXISTS=0
+fi
+
+if [[ "${IO_NODEGROUP_EXISTS}" == "1" ]]; then
+  echo "Reusing existing IO nodegroup ${IO_NODEGROUP_NAME}."
+else
+  log "Creating IO-optimised nodegroup ${IO_NODEGROUP_NAME} from ${NODEGROUP_TEMPLATE}"
+  # Patch the template on the fly so it works against this cluster without
+  # manual edits: metadata.name/region match ${CLUSTER_NAME}/${REGION}, and the
+  # first managedNodeGroups name is set to ${IO_NODEGROUP_NAME} so the created
+  # nodegroup matches the scale command printed at the end of this script.
+  PATCHED_NODEGROUP="${WORKDIR}/nodegroup.yaml"
+  cat > "${PATCHED_NODEGROUP}" <<EOF
 apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
 
@@ -320,9 +339,13 @@ metadata:
   region: ${REGION}
 
 EOF
-# ...then keep the managedNodeGroups section verbatim from the original template.
-sed -n '/^managedNodeGroups:/,$p' "${NODEGROUP_TEMPLATE}" >> "${PATCHED_NODEGROUP}"
-eksctl create nodegroup -f "${PATCHED_NODEGROUP}"
+  # Keep the managedNodeGroups section from the template, but rename the first
+  # nodegroup to ${IO_NODEGROUP_NAME} (only the first "- name:" is replaced).
+  sed -n '/^managedNodeGroups:/,$p' "${NODEGROUP_TEMPLATE}" \
+    | sed -E "0,/^([[:space:]]*- name:[[:space:]]*).*/s//\1${IO_NODEGROUP_NAME}/" \
+    >> "${PATCHED_NODEGROUP}"
+  eksctl create nodegroup -f "${PATCHED_NODEGROUP}"
+fi
 
 log "Step 11b: Raising Argo controller parallelism and retention"
 # Non-interactive equivalent of:
