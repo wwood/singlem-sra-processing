@@ -19,41 +19,86 @@
 # safe to automate, and otherwise reported as prerequisites.
 #
 # Usage:
-#   ./setup_weebill.bash                 # run the full setup
-#   SKIP_CLUSTER_CREATE=1 ./setup_weebill.bash   # skip long-running steps, e.g. re-runs
+#   ./setup_weebill.bash \
+#       --workflow-template cloud/argo/logan_workflow_template.yaml \
+#       --ecr-image 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v3
+#
+#   SKIP_CLUSTER_CREATE=1 ./setup_weebill.bash ...   # skip cluster creation on re-runs
+#
+# --workflow-template and --ecr-image are REQUIRED: the workflow template and
+# the image it runs must be chosen explicitly and kept consistent with each
+# other (the template runs the image you pass via --ecr-image).
 #
 set -euo pipefail
 
+log()  { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
+warn() { printf '\n\033[1;33m[!] %s\033[0m\n' "$*"; }
+die()  { printf '\n\033[1;31m[x] %s\033[0m\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") --workflow-template <path> --ecr-image <uri> [options]
+
+Required arguments:
+  --workflow-template <path>  Argo workflow template YAML used to submit jobs
+                              (e.g. cloud/argo/logan_workflow_template.yaml).
+  --ecr-image <uri>           Container image URI the workflow runs; verified to
+                              exist in ECR. Must match the image the template
+                              runs (e.g.
+                              656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v3).
+
+Options (defaults shown; may also be set via the matching environment variable):
+  --region <r>                AWS region (us-east-1)
+  --cluster-name <n>          EKS cluster name (sandpiper)
+  --bucket <b>                S3 bucket (woodcrob-sandpiper-us-east-1)
+  --nodegroup-template <p>    eksctl nodegroup config (cloud/argo/nodegroup_eks_template.yaml)
+  --test-accession <acc>      SRA accession for the template test job (SRR8653040)
+  -h, --help                  Show this help and exit
+EOF
+}
+
 ###############################################################################
-# Configuration (override any of these via the environment)
+# Configuration
 ###############################################################################
+# Optional settings (env-overridable; may also be set via the flags below)
 REGION="${REGION:-us-east-1}"
 CLUSTER_NAME="${CLUSTER_NAME:-sandpiper}"
 BUCKET="${BUCKET:-woodcrob-sandpiper-us-east-1}"
-ECR_IMAGE="${ECR_IMAGE:-656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v3}"
-
-# Cluster bootstrap node settings (the initial throwaway nodegroup)
 BOOTSTRAP_INSTANCE_TYPES="${BOOTSTRAP_INSTANCE_TYPES:-c7a.12xlarge}"
-
-# Argo settings
 ARGO_WORKFLOWS_VERSION="${ARGO_WORKFLOWS_VERSION:-v3.7.6}"
 ARGO_NAMESPACE="${ARGO_NAMESPACE:-argo}"
-
-# Kubernetes secret holding the S3 credentials that jobs use
 S3_SECRET_NAME="${S3_SECRET_NAME:-my-s3-credentials}"
-
-# Argo controller scaling
 NAMESPACE_PARALLELISM="${NAMESPACE_PARALLELISM:-3000}"
 RETENTION_COMPLETED="${RETENTION_COMPLETED:-500}"
 RETENTION_FAILED="${RETENTION_FAILED:-500}"
 RETENTION_ERRORED="${RETENTION_ERRORED:-500}"
-
-# Production IO-optimised nodegroup (created for scale-up)
 IO_NODEGROUP_NAME="${IO_NODEGROUP_NAME:-io-logan-mach2}"
 IO_NODEGROUP_MAX="${IO_NODEGROUP_MAX:-100}"
-
-# A test accession to submit through the real template
 TEST_SRA_ACCESSION="${TEST_SRA_ACCESSION:-SRR8653040}"
+NODEGROUP_TEMPLATE="${NODEGROUP_TEMPLATE:-}"
+
+# Required arguments (no defaults) - must be supplied on the command line.
+WORKFLOW_TEMPLATE="${WORKFLOW_TEMPLATE:-}"
+ECR_IMAGE="${ECR_IMAGE:-}"
+
+# Parse command-line arguments (override the above).
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --workflow-template)  WORKFLOW_TEMPLATE="${2:?--workflow-template needs a value}"; shift 2 ;;
+    --ecr-image)          ECR_IMAGE="${2:?--ecr-image needs a value}"; shift 2 ;;
+    --region)             REGION="${2:?--region needs a value}"; shift 2 ;;
+    --cluster-name)       CLUSTER_NAME="${2:?--cluster-name needs a value}"; shift 2 ;;
+    --bucket)             BUCKET="${2:?--bucket needs a value}"; shift 2 ;;
+    --nodegroup-template) NODEGROUP_TEMPLATE="${2:?--nodegroup-template needs a value}"; shift 2 ;;
+    --test-accession)     TEST_SRA_ACCESSION="${2:?--test-accession needs a value}"; shift 2 ;;
+    -h|--help)            usage; exit 0 ;;
+    *) usage; die "Unknown argument: $1" ;;
+  esac
+done
+
+# Enforce the required arguments.
+[[ -n "${WORKFLOW_TEMPLATE}" ]] || { usage; die "Missing required argument: --workflow-template"; }
+[[ -n "${ECR_IMAGE}" ]]         || { usage; die "Missing required argument: --ecr-image"; }
 
 # Resolve paths relative to this script so it works from anywhere
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,13 +106,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ARGO_DIR="${REPO_ROOT}/cloud/argo"
 
 # Files used from cloud/argo
-WORKFLOW_TEMPLATE="${ARGO_DIR}/logan_workflow_template.yaml"
 POLICY_FILE="${ARGO_DIR}/policy.json"
 NODEGROUP_TEMPLATE="${NODEGROUP_TEMPLATE:-${ARGO_DIR}/nodegroup_eks_template.yaml}"
-
-log()  { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
-warn() { printf '\n\033[1;33m[!] %s\033[0m\n' "$*"; }
-die()  { printf '\n\033[1;31m[x] %s\033[0m\n' "$*" >&2; exit 1; }
 
 ###############################################################################
 # 0. Pre-flight checks
@@ -143,16 +183,22 @@ argo version
 ###############################################################################
 log "Step 2: Docker image (prerequisite, already pushed)"
 echo "Using image: ${ECR_IMAGE}"
-# Verify the image exists in ECR so we fail early if it is missing.
-ECR_REPO="$(echo "${ECR_IMAGE}" | sed -E 's#^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/##; s/:.*$//')"
-ECR_TAG="$(echo "${ECR_IMAGE}" | sed -E 's/^.*://')"
-if ! aws ecr describe-images \
-      --region "${REGION}" \
-      --repository-name "${ECR_REPO}" \
-      --image-ids imageTag="${ECR_TAG}" >/dev/null 2>&1; then
-  warn "Could not verify image ${ECR_IMAGE} in ECR (check permissions/region). Continuing."
+# Verify the image exists when it is a private ECR image (<account>.dkr.ecr.
+# <region>.amazonaws.com/...) so we fail early if it is missing. Public ECR
+# (public.ecr.aws/...) and other registries are not queried this way.
+if [[ "${ECR_IMAGE}" =~ ^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/ ]]; then
+  ECR_REPO="$(echo "${ECR_IMAGE}" | sed -E 's#^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/##; s/:.*$//')"
+  ECR_TAG="$(echo "${ECR_IMAGE}" | sed -E 's/^.*://')"
+  if ! aws ecr describe-images \
+        --region "${REGION}" \
+        --repository-name "${ECR_REPO}" \
+        --image-ids imageTag="${ECR_TAG}" >/dev/null 2>&1; then
+    warn "Could not verify image ${ECR_IMAGE} in ECR (check permissions/region). Continuing."
+  else
+    echo "Confirmed ${ECR_IMAGE} exists in ECR."
+  fi
 else
-  echo "Confirmed ${ECR_IMAGE} exists in ECR."
+  echo "Image is not a private ECR URI; skipping ECR existence check."
 fi
 
 ###############################################################################
