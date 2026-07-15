@@ -53,6 +53,12 @@ Options (defaults shown; may also be set via the matching environment variable):
   --bucket <b>                S3 bucket (woodcrob-sandpiper-us-east-1)
   --nodegroup-template <p>    eksctl nodegroup config (cloud/argo/nodegroup_eks_template.yaml)
   --test-accession <acc>      SRA accession for the template test job (SRR8653040)
+  --test-parameter KEY=VALUE  Parameter for the Step 10 smoke-test submission;
+                              repeatable. If given, these fully replace the
+                              default (SRA_accession_num=<test-accession>). Use
+                              for templates needing extra parameters, e.g.
+                              --test-parameter batch_name=smoke
+                              --test-parameter reference_s3_uri=s3://...
   -h, --help                  Show this help and exit
 EOF
 }
@@ -81,6 +87,13 @@ NODEGROUP_TEMPLATE="${NODEGROUP_TEMPLATE:-}"
 WORKFLOW_TEMPLATE="${WORKFLOW_TEMPLATE:-}"
 ECR_IMAGE="${ECR_IMAGE:-}"
 
+# Parameters passed to the Step 10 smoke-test submission. Populated by
+# repeated --test-parameter KEY=VALUE flags; if none are given, defaults to
+# just SRA_accession_num below. Templates that require additional parameters
+# (e.g. sra_multi_workflow_template.yaml needs batch_name / ephemeral_storage_mb
+# / reference_s3_uri) should supply them explicitly with --test-parameter.
+TEST_PARAMETERS=()
+
 # Parse command-line arguments (override the above).
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -91,6 +104,7 @@ while [[ $# -gt 0 ]]; do
     --bucket)             BUCKET="${2:?--bucket needs a value}"; shift 2 ;;
     --nodegroup-template) NODEGROUP_TEMPLATE="${2:?--nodegroup-template needs a value}"; shift 2 ;;
     --test-accession)     TEST_SRA_ACCESSION="${2:?--test-accession needs a value}"; shift 2 ;;
+    --test-parameter)     TEST_PARAMETERS+=("${2:?--test-parameter needs KEY=VALUE}"); shift 2 ;;
     -h|--help)            usage; exit 0 ;;
     *) usage; die "Unknown argument: $1" ;;
   esac
@@ -100,13 +114,18 @@ done
 [[ -n "${WORKFLOW_TEMPLATE}" ]] || { usage; die "Missing required argument: --workflow-template"; }
 [[ -n "${ECR_IMAGE}" ]]         || { usage; die "Missing required argument: --ecr-image"; }
 
+# Default the smoke-test parameters to just the SRA accession if none were
+# supplied. --test-parameter values, when given, fully replace this default.
+if [[ ${#TEST_PARAMETERS[@]} -eq 0 ]]; then
+  TEST_PARAMETERS=("SRA_accession_num=${TEST_SRA_ACCESSION}")
+fi
+
 # Resolve paths relative to this script so it works from anywhere
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ARGO_DIR="${REPO_ROOT}/cloud/argo"
 
 # Files used from cloud/argo
-POLICY_FILE="${ARGO_DIR}/policy.json"
 NODEGROUP_TEMPLATE="${NODEGROUP_TEMPLATE:-${ARGO_DIR}/nodegroup_eks_template.yaml}"
 
 ###############################################################################
@@ -123,7 +142,6 @@ aws sts get-caller-identity >/dev/null 2>&1 \
   || die "AWS credentials not configured. Run 'aws configure' (or refresh SSO) first."
 
 [[ -f "${WORKFLOW_TEMPLATE}" ]] || die "Missing workflow template: ${WORKFLOW_TEMPLATE}"
-[[ -f "${POLICY_FILE}" ]]       || die "Missing IAM policy file: ${POLICY_FILE}"
 [[ -f "${NODEGROUP_TEMPLATE}" ]] || die "Missing nodegroup template: ${NODEGROUP_TEMPLATE}"
 
 # Detect OS for the binary downloads (darwin vs linux)
@@ -296,11 +314,32 @@ else
   aws iam create-user --user-name "${S3_USER}"
 fi
 
+# Render the S3 access policy for the selected bucket. The static
+# cloud/argo/policy.json is hard-coded to the default bucket, so generate the
+# document from ${BUCKET} here to keep the credentials valid when --bucket is
+# overridden.
+RENDERED_POLICY="${WORKDIR}/policy.json"
+jq -n --arg bucket "${BUCKET}" '{
+  Version: "2012-10-17",
+  Statement: [
+    {
+      Effect: "Allow",
+      Action: ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+      Resource: "arn:aws:s3:::\($bucket)/*"
+    },
+    {
+      Effect: "Allow",
+      Action: ["s3:ListBucket"],
+      Resource: "arn:aws:s3:::\($bucket)"
+    }
+  ]
+}' > "${RENDERED_POLICY}"
+
 # Attach inline policy (idempotent - put-user-policy overwrites)
 aws iam put-user-policy \
   --user-name "${S3_USER}" \
   --policy-name "${S3_POLICY}" \
-  --policy-document "file://${POLICY_FILE}"
+  --policy-document "file://${RENDERED_POLICY}"
 
 # Create an access key only if the k8s secret does not already exist.
 if kubectl -n "${ARGO_NAMESPACE}" get secret "${S3_SECRET_NAME}" >/dev/null 2>&1; then
@@ -325,9 +364,14 @@ fi
 ###############################################################################
 # Step 10. Submit a real job using the workflow template
 ###############################################################################
-log "Step 10: Submitting test job with the workflow template (accession ${TEST_SRA_ACCESSION})"
+log "Step 10: Submitting test job with the workflow template"
+echo "Parameters: ${TEST_PARAMETERS[*]}"
+PARAM_ARGS=()
+for p in "${TEST_PARAMETERS[@]}"; do
+  PARAM_ARGS+=(--parameter "${p}")
+done
 argo submit -n "${ARGO_NAMESPACE}" \
-  --parameter SRA_accession_num="${TEST_SRA_ACCESSION}" \
+  "${PARAM_ARGS[@]}" \
   "${WORKFLOW_TEMPLATE}" --watch
 
 ###############################################################################
