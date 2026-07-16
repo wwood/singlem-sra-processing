@@ -44,7 +44,7 @@ ENV RUSTFLAGS="-C target-cpu=native -C strip=symbols"
 # wwood/weebill mirror) does NOT have `sketch --merge`, so pin the commit on the
 # add-merge-single-paired branch that does. (Mirrors sylph_build_from_source
 # .Dockerfile, which likewise builds from a wwood/sylph feature branch.)
-ENV WEEBILL_COMMIT v0.1.0
+ENV WEEBILL_COMMIT v0.2.0
 RUN git clone https://github.com/wwood/sylph /tmp/weebill \
     && cd /tmp/weebill \
     && git checkout ${WEEBILL_COMMIT} \
