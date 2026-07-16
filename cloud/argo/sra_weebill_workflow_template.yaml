@@ -99,7 +99,7 @@ spec:
       # step reads only the blocks it needs via pread from this local copy.
       initContainers:
         - name: fetch-reference
-          image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v2
+          image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v3
           volumeMounts:
             - name: ref-cache
               mountPath: /refcache
@@ -139,7 +139,7 @@ spec:
               fi
               ls -lh "$REF"
       container:
-        image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v2
+        image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v3
         volumeMounts:
           - name: ref-cache
             mountPath: /refcache
