@@ -246,11 +246,11 @@ if [[ "${OS}" == "darwin" ]]; then
 else
   PLATFORM="Linux_${ARCH}"
 fi
-curl -fsSLo "${WORKDIR}/eksctl.tar.gz" \
+curl -fsSLo "${WORKDIR}/eksctl_${PLATFORM}.tar.gz" \
   "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_${PLATFORM}.tar.gz"
 curl -fsSL "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_checksums.txt" \
   | grep "${PLATFORM}" | (cd "${WORKDIR}" && sha256sum --check)
-tar -xzf "${WORKDIR}/eksctl.tar.gz" -C "${WORKDIR}"
+tar -xzf "${WORKDIR}/eksctl_${PLATFORM}.tar.gz" -C "${WORKDIR}"
 sudo mv "${WORKDIR}/eksctl" /usr/local/bin/eksctl
 eksctl version
 

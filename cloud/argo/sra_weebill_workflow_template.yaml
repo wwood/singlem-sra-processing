@@ -48,6 +48,23 @@ metadata:
 spec:
   entrypoint: singlem
 
+  # Workflow-level defaults for every parameter referenced as
+  # {{workflow.parameters.*}} below. Declaring them here documents the accepted
+  # parameters and lets the workflow be submitted with a subset; `argo submit
+  # --parameter k=v` overrides any of these at submission time. (The disk-request
+  # quantity is set via podSpecPatch on the singlem template, not here - see the
+  # comment there for why a parameterised resources: field fails validation.)
+  arguments:
+    parameters:
+      - name: SRA_accession_num
+        value: '' # Space-separated list of SRA accessions; set per submission.
+      - name: batch_name
+        value: default
+      - name: ephemeral_storage_mb
+        value: '20000' # Requested local disk (MiB); must be numeric for the quantity validator.
+      - name: reference_s3_uri
+        value: '' # s3:// URI of the weebill .sylref reference DB; set per submission.
+
   # Node-local cache for the weebill .sylref reference DB. hostPath is shared by
   # all pods on a node, so the reference is downloaded once per node (by the
   # fetch-reference initContainer) rather than once per pod. DirectoryOrCreate so
@@ -72,6 +89,20 @@ spec:
 
   templates:
     - name: singlem
+      # Set the disk request via podSpecPatch rather than a resources: field.
+      # Argo's spec validation runs the Kubernetes resource-quantity regex over
+      # resources.requests/limits, and it rejects ANY {{...}} placeholder there
+      # (it substitutes the literal "placeholder", giving "placeholderMi" ->
+      # `quantities must match the regular expression ...`). podSpecPatch is an
+      # opaque templated string that is merged into the pod at runtime and is
+      # NOT quantity-validated at submit time, so a parameterised value works.
+      # The container name in an Argo container template is always "main".
+      podSpecPatch: |
+        containers:
+          - name: main
+            resources:
+              requests:
+                ephemeral-storage: '{{inputs.parameters.ephemeral_storage_mb}}Mi'
       retryStrategy:
         # Always: retry on node-loss Errors (spot preemption), not just non-zero exits.
         # Retries are cheap here because the pod skips accessions already uploaded to S3,
@@ -181,7 +212,7 @@ spec:
         mkfifo $A.pairs.fifo $A.singles.fifo;
         sracat-rs --eager-open-output --single-out $A.singles.fifo $A.sra > $A.pairs.fifo &
         sracat_pid=$!;
-        weebill sketch --merge --reference $REF --interleaved $A.pairs.fifo --reads $A.singles.fifo -S $A --compressed-database $A -t 1;
+        weebill sketch --tolerate-empty-inputs --merge --reference $REF --interleaved $A.pairs.fifo --reads $A.singles.fifo -S $A -d $A -t 1;
         wait $sracat_pid;
         mv $A.sylspr sketches/$A.sylspr;
         echo passed $A;
@@ -203,8 +234,9 @@ spec:
           requests:
             memory: "4000Mi"
             cpu: 1 # Whole-run processing like the Logan workflow; sketching is CPU bound.
-            # File-size based scheduling constraint - see the description above.
-            ephemeral-storage: '{{inputs.parameters.ephemeral_storage_mb}}Mi'
+            # ephemeral-storage (the file-size scheduling constraint described
+            # above) is set via podSpecPatch at the top of this template, not
+            # here, because a parameterised quantity fails Argo's validation.
       # No Argo output artifacts: each sketch/log is uploaded to S3 per accession
       # inside the loop (see the container args), so completed work survives a spot
       # interruption instead of only being uploaded on whole-pod success.
