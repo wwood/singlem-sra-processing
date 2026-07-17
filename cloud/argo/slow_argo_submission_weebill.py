@@ -176,18 +176,23 @@ if __name__ == '__main__':
                         f.write("\n---\n")
                     # Name the workflow after the pod's first accession (DNS-1123 requires lowercase)
                     first_acc = row['pod_accessions'].split()[0].lower()
+                    # Substitute the __SENTINEL__ tokens in the template's
+                    # top-level spec.arguments.parameters (the values Argo binds
+                    # onto the entrypoint at runtime). The entrypoint inputs keep
+                    # their {{workflow.parameters.*}} references and resolve from
+                    # these. See the arguments-block comment in the template.
                     f.write(template.replace(
-                        "{{workflow.parameters.SRA_accession_num}}", row['pod_accessions']).replace(
+                        "__SRA_ACCESSION_NUM__", row['pod_accessions']).replace(
                         'generateName: singlem-', f'generateName: multi-{first_acc}-').replace(
-                        "{{workflow.parameters.ephemeral_storage_mb}}", str(row['ephemeral_storage_mb'])).replace(
-                        "{{workflow.parameters.reference_s3_uri}}", args.reference_s3_uri).replace(
-                        "{{workflow.parameters.batch_name}}", row['batch_name']))
+                        "__EPHEMERAL_STORAGE_MB__", str(row['ephemeral_storage_mb'])).replace(
+                        "__REFERENCE_S3_URI__", args.reference_s3_uri).replace(
+                        "__BATCH_NAME__", row['batch_name']))
                 f.flush()
 
                 while True:
                     try:
                         os.makedirs("submissions", exist_ok=True)
-                        extern.run(f"argo submit -n argo -o json {f.name} |jq > submissions/multi-{i}-`date +%Y%m%d-%H%M%S`.argo_submission.json")
+                        extern.run(f"argo submit -n argo -o json {f.name} |jq > submissions/weebill-{i}-`date +%Y%m%d-%H%M%S`.argo_submission.json")
                     except extern.ExternCalledProcessError as e:
                         logging.warning("Failed to argo submit. Retrying after pause. Error was {}".format(e))
                         time.sleep(args.sleep_interval)

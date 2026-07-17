@@ -14,5 +14,5 @@ managedNodeGroups:
     volumeSize: 350
     volumeType: gp3
     volumeIOPS: 6000
-    volumeThroughput: 300
+    volumeThroughput: 1000 # gp3 max; the .sylref pread traffic + SRA downloads share this one root volume, and 300 saturated it (VolumeThroughputExceeded)
     spot: true

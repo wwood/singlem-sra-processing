@@ -1,3 +1,3 @@
-pod_accessions,batch_name,ephemeral_storage_mb,pod_id,n_accessions,total_mbytes
-SRR36222975 SRR32600033 SRR36782522,multi_test5,5866,0,3,433
-SRR31284847 ERR16024520,multi_test5,5226,1,2,113
+pod_accessions,batch_name,ephemeral_storage_mb,pod_id,n_accessions,total_mbytes,max_mbytes,size_band
+ERR3191637 SRR7077546 ERR11563261,multi_test5,5292,0,3,508,225,0-5GB
+SRR6486364 SRR35938647,multi_test5,5068,1,2,98,53,0-5GB

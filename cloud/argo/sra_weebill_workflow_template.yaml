@@ -48,22 +48,31 @@ metadata:
 spec:
   entrypoint: singlem
 
-  # Workflow-level defaults for every parameter referenced as
-  # {{workflow.parameters.*}} below. Declaring them here documents the accepted
-  # parameters and lets the workflow be submitted with a subset; `argo submit
-  # --parameter k=v` overrides any of these at submission time. (The disk-request
-  # quantity is set via podSpecPatch on the singlem template, not here - see the
-  # comment there for why a parameterised resources: field fails validation.)
+  # Workflow-level arguments for every parameter referenced as
+  # {{workflow.parameters.*}} below. Argo binds THESE onto the entrypoint
+  # (singlem) template's inputs at runtime, overriding that template's own input
+  # defaults - so this block, not the entrypoint inputs, is the authoritative
+  # place a value must be set. Two submission paths set them:
+  #   * `argo submit --parameter k=v` (e.g. setup_aws.bash --test-parameter for
+  #     smoke tests) overrides any value here at submission time; and
+  #   * slow_argo_submission_weebill.py textually substitutes the placeholder
+  #     sentinel tokens below per submitted workflow (it submits many in one
+  #     file with different accessions, so it cannot use a single --parameter).
+  # The sentinels are deliberately not runnable defaults: a submission that
+  # leaves one unset fails loudly rather than silently processing nothing. (The
+  # disk-request quantity is applied via podSpecPatch on the singlem template,
+  # not here - see the comment there for why a parameterised resources: field
+  # fails validation.)
   arguments:
     parameters:
       - name: SRA_accession_num
-        value: '' # Space-separated list of SRA accessions; set per submission.
+        value: '__SRA_ACCESSION_NUM__' # Space-separated list of SRA accessions; set per submission.
       - name: batch_name
-        value: default
+        value: '__BATCH_NAME__'
       - name: ephemeral_storage_mb
-        value: '20000' # Requested local disk (MiB); must be numeric for the quantity validator.
+        value: '__EPHEMERAL_STORAGE_MB__' # Requested local disk (MiB); must be numeric for the quantity validator.
       - name: reference_s3_uri
-        value: '' # s3:// URI of the weebill .sylref reference DB; set per submission.
+        value: '__REFERENCE_S3_URI__' # s3:// URI of the weebill .sylref reference DB; set per submission.
 
   # Node-local cache for the weebill .sylref reference DB. hostPath is shared by
   # all pods on a node, so the reference is downloaded once per node (by the
@@ -221,7 +230,7 @@ spec:
         if [ $status -ne 0 ]; then echo FAILED $A exit $status >> logs/$A.log; fi;
         aws s3 cp logs/$A.log $S3/logs/$A.log --quiet || echo WARN log upload failed for $A;
         if [ $status -eq 0 ]; then
-        if aws s3 cp sketches/$A.sylspr $S3/sketches/$A.sylspr.tmp --quiet && aws s3 mv $S3/sketches/$A.sylspr.tmp $S3/sketches/$A.sylspr --quiet; then rm -f sketches/$A.sylspr; else aws s3 rm $S3/sketches/$A.sylspr.tmp --quiet 2>/dev/null; echo WARN sketch upload failed for $A - keeping local copy and will exit non-zero to trigger retry; upload_failed=1; fi;
+        if aws s3 cp sketches/$A.sylspr $S3/sketches/$A.sylspr.tmp --only-show-errors && aws s3 mv $S3/sketches/$A.sylspr.tmp $S3/sketches/$A.sylspr --only-show-errors; then rm -f sketches/$A.sylspr; else aws s3 rm $S3/sketches/$A.sylspr.tmp --quiet 2>/dev/null; echo WARN sketch upload failed for $A - keeping local copy and will exit non-zero to trigger retry; upload_failed=1; fi;
         else
         aws s3 cp logs/$A.log $S3/failures/$A.log --quiet || echo WARN failure-log upload failed for $A;
         fi;
@@ -232,7 +241,7 @@ spec:
         ]
         resources:
           requests:
-            memory: "4000Mi"
+            memory: "4000Mi" # a minimum, I think
             cpu: 1 # Whole-run processing like the Logan workflow; sketching is CPU bound.
             # ephemeral-storage (the file-size scheduling constraint described
             # above) is set via podSpecPatch at the top of this template, not
