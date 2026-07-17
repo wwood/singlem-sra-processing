@@ -139,7 +139,7 @@ spec:
       # step reads only the blocks it needs via pread from this local copy.
       initContainers:
         - name: fetch-reference
-          image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v3
+          image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v4
           volumeMounts:
             - name: ref-cache
               mountPath: /refcache
@@ -179,7 +179,7 @@ spec:
               fi
               ls -lh "$REF"
       container:
-        image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v3
+        image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v4
         volumeMounts:
           - name: ref-cache
             mountPath: /refcache
@@ -221,7 +221,7 @@ spec:
         mkfifo $A.pairs.fifo $A.singles.fifo;
         sracat-rs --eager-open-output --single-out $A.singles.fifo $A.sra > $A.pairs.fifo &
         sracat_pid=$!;
-        weebill sketch --tolerate-empty-inputs --merge --reference $REF --interleaved $A.pairs.fifo --reads $A.singles.fifo -S $A -d $A -t 1;
+        weebill sketch --tolerate-empty-inputs --merge --reference $REF --interleaved $A.pairs.fifo --reads $A.singles.fifo -S $A -d $A -t 4;
         wait $sracat_pid;
         mv $A.sylspr sketches/$A.sylspr;
         echo passed $A;
@@ -242,7 +242,7 @@ spec:
         resources:
           requests:
             memory: "4000Mi" # a minimum, I think
-            cpu: 1 # Whole-run processing like the Logan workflow; sketching is CPU bound.
+            cpu: "1500m" # Whole-run processing like the Logan workflow; sketching is CPU bound.
             # ephemeral-storage (the file-size scheduling constraint described
             # above) is set via podSpecPatch at the top of this template, not
             # here, because a parameterised quantity fails Argo's validation.
