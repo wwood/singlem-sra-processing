@@ -105,11 +105,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         bird_tool_utils argparse-manpage-birdtools extern kingfisher \
     && apt-get purge -y python3-pip \
     && apt-get autoremove -y \
-    && mkdir -p /etc/ncbi \
-    && printf '/LIBS/IMAGE_GUID = "%s"\n' `uuidgen` > /etc/ncbi/settings.kfg \
-    && printf '/libs/cloud/report_instance_identity = "true"\n' >> /etc/ncbi/settings.kfg \
     && rm -rf /var/lib/apt/lists/* /root/.cache \
     && apt-get clean
+
+# ncbi-vdb configuration so sracat-rs can read reference-compressed (cSRA) runs -
+# those submitted as aligned CRAM/BAM, whose READ bases are stored as differences
+# against a reference genome. Reading them requires fetching the REFSEQ objects
+# from NCBI into a writable cache; without this config that fetch never happens
+# and the read dies on the first row with "row 1: reading READ failed", so
+# sracat-rs emits nothing and weebill reports "No reads were sketched". See
+# vdb-settings.kfg for the full rationale. The reference cache is POD-LOCAL
+# (/root/ncbi/public on ephemeral disk, per vdb-settings.kfg), created here so
+# the first read can write into it. IMAGE_GUID is a per-image identifier appended
+# at build time (kept out of the committed file so each build is unique).
+COPY vdb-settings.kfg /etc/ncbi/settings.kfg
+RUN printf '/LIBS/IMAGE_GUID = "%s"\n' "$(uuidgen)" >> /etc/ncbi/settings.kfg \
+    && mkdir -p /root/ncbi/public
 
 COPY --from=builder /usr/local/bin/weebill /usr/local/bin/weebill
 COPY --from=builder /usr/local/bin/sracat-rs /usr/local/bin/sracat-rs
@@ -140,7 +151,27 @@ RUN cd /tmp && bash -e -o pipefail -c '\
     sracat-rs --eager-open-output --single-out singles.fifo SRR8653040.sra > pairs.fifo & \
     weebill sketch --merge --tolerate-empty-inputs --interleaved pairs.fifo --reads singles.fifo -S SRR8653040 --compressed-database /tmp/SRR8653040 -t 1; \
     wait; \
-    ls -lh /tmp/SRR8653040.sylspc' \
+    ls -lh /tmp/SRR8653040.sylspc'
+
+# Reference-compressed (cSRA) read path. Runs submitted as aligned CRAM/BAM store
+# READ bases relative to a reference genome that ncbi-vdb must fetch remotely to
+# reconstruct the reads. Without the vdb config baked into the runtime image (the
+# `COPY vdb-settings.kfg` above), that fetch never happens: reading dies on the
+# first row with "row 1: reading READ failed", sracat-rs emits nothing, and
+# weebill exits non-zero with "No reads were sketched" - exactly how ERR12086224
+# and other cSRA runs failed in production while plain runs succeeded. ERR12909594
+# is a tiny (~200 KB .sra) member of the same study (PRJEB44545), aligned to a
+# small bacterial reference (FM211187.1 ~3 Mb), so this exercises remote reference
+# resolution end to end for a trivial download. It MUST yield a sketch; if the vdb
+# config ever regresses, weebill exits non-zero here and the build fails instead
+# of the failure only surfacing on the queue.
+RUN cd /tmp && kingfisher get -r ERR12909594 -m aws-http -f sra --guess-aws-location --hide-download-progress
+RUN cd /tmp && bash -e -o pipefail -c '\
+    mkfifo cpairs.fifo csingles.fifo; \
+    sracat-rs --eager-open-output --single-out csingles.fifo ERR12909594.sra > cpairs.fifo & \
+    weebill sketch --merge --tolerate-empty-inputs --interleaved cpairs.fifo --reads csingles.fifo -S ERR12909594 --compressed-database /tmp/ERR12909594 -t 1; \
+    wait; \
+    ls -lh /tmp/ERR12909594.sylspc' \
     && touch /smoke-ok
 
 # ------------------------------------------------------------------ final image

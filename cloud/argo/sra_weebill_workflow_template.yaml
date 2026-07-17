@@ -14,28 +14,39 @@ metadata:
       Per accession, with no intermediate fastq written to disk:
         kingfisher get                          -> $A.sra
         sracat-rs --single-out singles.fifo ...  > pairs.fifo   (one writer, two FIFOs)
-        weebill sketch --merge --reference $REF --interleaved pairs.fifo --reads singles.fifo -d $A
+        weebill sketch --merge --reference $REF --interleaved pairs.fifo --reads singles.fifo -d $A  -> $A.sylspr
+        weebill profile --two-stage --reference $REF $SYL2DB $A.sylspr                               -> $A.profile.tsv (gzipped)
       sracat-rs streams interleaved paired reads to one FIFO and single/orphan reads
       to the other; `weebill sketch --merge` sketches each FIFO on its own thread (so
       both are drained concurrently and neither pipe deadlocks) and merges them into a
-      single reference-compressed sample sketch (.sylspr). See the
-      weebill_build_from_source Dockerfile in cloud/docker for the image.
+      single reference-compressed sample sketch (.sylspr). That sketch is then profiled
+      with `weebill profile --two-stage` against the .syl2db two-stage database, and the
+      resulting TSV is gzipped and uploaded. See the weebill_build_from_source
+      Dockerfile in cloud/docker for the image.
 
-      The .sylspr output is written against a weebill .sylref reference DB. That DB is
-      large but seekable, so rather than baking it into the image or copying it per
-      pod, the fetch-reference initContainer downloads it once per node onto a hostPath
-      cache (reference_s3_uri) shared by every pod on the node; the sketch step then
-      preads only the blocks each sample needs from that local copy.
+      The .sylspr output is written against a weebill .sylref reference DB, and the
+      profile step reads a .syl2db two-stage database. Both are large but seekable, so
+      rather than baking them into the image or copying them per pod, the
+      fetch-references initContainer downloads each once per node onto a hostPath cache
+      (reference_s3_uri and syl2db_s3_uri) shared by every pod on the node; the sketch
+      and profile steps then pread only the blocks each sample needs. Each file is
+      guarded by its own lock (so a file lands once per node) and the initContainer
+      randomises which file it fetches first, so that when many pods start together on a
+      fresh node the two files download in parallel across pods rather than serially.
 
-      Spot-safe, resumable, per-accession outputs. Each sketch and log is uploaded to
-      S3 directly as the accession finishes, NOT via an end-of-pod Argo artifact - so a
-      spot interruption never loses already-completed sketches. At the top of the loop
-      the pod skips any accession whose .sylspr is already in S3, so an Argo retry (on
-      spot loss; retryPolicy Always) resumes at the interrupted accession instead of
-      redoing the whole pod. Outputs, all keyed per accession under {batch_name}/:
-        sketches/$A.sylspr   successful sketch
-        logs/$A.log          log for every accession attempted
-        failures/$A.log      copy of the log for accessions that failed (for diagnosis)
+      Spot-safe, resumable, per-accession outputs. Each sketch, profile and log is
+      uploaded to S3 directly as the accession finishes, NOT via an end-of-pod Argo
+      artifact - so a spot interruption never loses already-completed work. At the top
+      of the loop the pod skips any accession whose .sylspr is already in S3, so an Argo
+      retry (on spot loss; retryPolicy Always) resumes at the interrupted accession
+      instead of redoing the whole pod. The profile is uploaded BEFORE the sketch, so
+      the sketch is the last object written for an accession - the skip check keys on it
+      and thus only fires once both outputs are present. Outputs, all keyed per
+      accession under {batch_name}/:
+        sketches/$A.sylspr        successful sketch
+        profiles/$A.profile.tsv.gz gzipped two-stage profile TSV
+        logs/$A.log               log for every accession attempted
+        failures/$A.log           copy of the log for accessions that failed (for diagnosis)
       A failed accession does not abort the pod, so its siblings still complete.
 
       To avoid a single node being overwhelmed by many large SRA downloads running in
@@ -73,6 +84,12 @@ spec:
         value: '__EPHEMERAL_STORAGE_MB__' # Requested local disk (MiB); must be numeric for the quantity validator.
       - name: reference_s3_uri
         value: '__REFERENCE_S3_URI__' # s3:// URI of the weebill .sylref reference DB; set per submission.
+      - name: syl2db_s3_uri
+        # s3:// URI of the weebill .syl2db two-stage profiling database. Unlike the
+        # sentinels above this carries a real default: it is a fixed companion to the
+        # reference (matched r232 version), so submissions need not set it. Override
+        # with `argo submit --parameter syl2db_s3_uri=...` if it ever changes.
+        value: 's3://woodcrob-sandpiper-us-east-1/db/r232.100.syl2db'
 
   # Node-local cache for the weebill .sylref reference DB. hostPath is shared by
   # all pods on a node, so the reference is downloaded once per node (by the
@@ -131,14 +148,20 @@ spec:
             value: '{{workflow.parameters.ephemeral_storage_mb}}'
           - name: reference_s3_uri
             # s3:// URI of the weebill .sylref reference DB. Cached once per node on
-            # a hostPath (see the fetch-reference initContainer below) and read by
+            # a hostPath (see the fetch-references initContainer below) and read by
             # `weebill sketch --reference` to write .sylspr sketches directly.
             value: '{{workflow.parameters.reference_s3_uri}}'
-      # Cache the (large) .sylref on the node's local disk exactly once, shared by
-      # every pod that lands on this node. The .sylref is seekable, so the sketch
-      # step reads only the blocks it needs via pread from this local copy.
+          - name: syl2db_s3_uri
+            # s3:// URI of the weebill .syl2db two-stage profiling database. Cached
+            # once per node on the same hostPath as the reference (fetch-references
+            # initContainer below) and read by `weebill profile --two-stage`.
+            value: '{{workflow.parameters.syl2db_s3_uri}}'
+      # Cache the (large) .sylref reference and .syl2db two-stage database on the
+      # node's local disk exactly once each, shared by every pod that lands on this
+      # node. Both are seekable, so the sketch/profile steps read only the blocks they
+      # need via pread from these local copies.
       initContainers:
-        - name: fetch-reference
+        - name: fetch-references
           image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v4
           volumeMounts:
             - name: ref-cache
@@ -161,23 +184,42 @@ spec:
           args:
             - |
               set -eo pipefail
-              REF_URI='{{inputs.parameters.reference_s3_uri}}'
-              # Key the cache on a hash of the FULL URI, not just the basename, so two
-              # different references that share a filename cannot collide on this node.
-              REF="/refcache/$(printf %s "$REF_URI" | sha256sum | cut -c1-16).$(basename "$REF_URI")"
               mkdir -p /refcache
-              # Serialise across pods that start on this node at the same time, so
-              # the reference is downloaded once. flock is held for the whole block.
-              exec 9>/refcache/.download.lock
-              flock 9
-              if [ -s "$REF" ]; then
-                echo "Reference already cached: $REF"
+              REF_URI='{{inputs.parameters.reference_s3_uri}}'
+              SYL2DB_URI='{{inputs.parameters.syl2db_s3_uri}}'
+
+              # Download one s3:// URI into the node-local cache. The cache path is
+              # keyed on a hash of the FULL URI (not just the basename), so two files
+              # that share a filename cannot collide on this node. A PER-FILE flock
+              # means only downloads of the SAME file serialise (so it lands exactly
+              # once per node); two DIFFERENT files can download concurrently.
+              fetch() {
+                local uri="$1"
+                local dest="/refcache/$(printf %s "$uri" | sha256sum | cut -c1-16).$(basename "$uri")"
+                (
+                  flock 9
+                  if [ -s "$dest" ]; then
+                    echo "Already cached: $dest"
+                  else
+                    echo "Downloading $uri -> $dest"
+                    aws s3 cp "$uri" "$dest.tmp" --only-show-errors
+                    mv "$dest.tmp" "$dest"
+                  fi
+                  ls -lh "$dest"
+                ) 9>"$dest.lock"
+              }
+
+              # Randomise which file this pod fetches first. When many pods start on a
+              # fresh node together, per-file locks alone would still let them all queue
+              # on the reference first (downloading it once, serially) and only then
+              # start the syl2db. Randomising the lead file means different pods hold
+              # different locks at the same time, so the reference and the syl2db
+              # download in parallel across pods instead of one-after-the-other.
+              if [ $((RANDOM % 2)) -eq 0 ]; then
+                fetch "$REF_URI"; fetch "$SYL2DB_URI"
               else
-                echo "Downloading $REF_URI -> $REF"
-                aws s3 cp "$REF_URI" "$REF.tmp" --quiet
-                mv "$REF.tmp" "$REF"
+                fetch "$SYL2DB_URI"; fetch "$REF_URI"
               fi
-              ls -lh "$REF"
       container:
         image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v4
         volumeMounts:
@@ -185,7 +227,7 @@ spec:
             mountPath: /refcache
             readOnly: true
         # S3 credentials for the per-accession uploads below (same secret the
-        # fetch-reference initContainer and the artifact system use).
+        # fetch-references initContainer and the artifact system use).
         env:
           - name: AWS_DEFAULT_REGION
             value: us-east-1
@@ -209,12 +251,13 @@ spec:
         echo workflow UID: {{workflow.uid}};
         echo date: `date`;
         REF=/refcache/`printf %s {{inputs.parameters.reference_s3_uri}} | sha256sum | cut -c1-16`.`basename {{inputs.parameters.reference_s3_uri}}`;
-        ls -lh $REF;
+        SYL2DB=/refcache/`printf %s {{inputs.parameters.syl2db_s3_uri}} | sha256sum | cut -c1-16`.`basename {{inputs.parameters.syl2db_s3_uri}}`;
+        ls -lh $REF $SYL2DB;
         S3=s3://woodcrob-sandpiper-us-east-1/{{inputs.parameters.batch_name}};
-        mkdir -p logs sketches;
+        mkdir -p logs sketches profiles;
         for A in {{inputs.parameters.SRA_accession_num}}; do
         if aws s3 ls $S3/sketches/$A.sylspr >/dev/null 2>&1; then echo skipping $A, already in S3; continue; fi;
-        A=$A REF=$REF bash -e -o pipefail -c '
+        A=$A REF=$REF SYL2DB=$SYL2DB bash -e -o pipefail -c '
         echo processing $A on `date`;
         kingfisher get -r $A --output-format-possibilities sra --guess-aws-location --hide-download-progress -m aws-http;
         ls -lh $A.sra; free -h; df -h;
@@ -224,12 +267,16 @@ spec:
         weebill sketch --tolerate-empty-inputs --merge --reference $REF --interleaved $A.pairs.fifo --reads $A.singles.fifo -S $A -d $A -t 4;
         wait $sracat_pid;
         mv $A.sylspr sketches/$A.sylspr;
+        weebill profile --two-stage --reference $REF $SYL2DB sketches/$A.sylspr -o $A.profile.tsv -t 4;
+        gzip $A.profile.tsv;
+        mv $A.profile.tsv.gz profiles/$A.profile.tsv.gz;
         echo passed $A;
         ' 2>&1 | tee logs/$A.log;
         status=${PIPESTATUS[0]};
         if [ $status -ne 0 ]; then echo FAILED $A exit $status >> logs/$A.log; fi;
         aws s3 cp logs/$A.log $S3/logs/$A.log --quiet || echo WARN log upload failed for $A;
         if [ $status -eq 0 ]; then
+        if aws s3 cp profiles/$A.profile.tsv.gz $S3/profiles/$A.profile.tsv.gz.tmp --only-show-errors && aws s3 mv $S3/profiles/$A.profile.tsv.gz.tmp $S3/profiles/$A.profile.tsv.gz --only-show-errors; then rm -f profiles/$A.profile.tsv.gz; else aws s3 rm $S3/profiles/$A.profile.tsv.gz.tmp --quiet 2>/dev/null; echo WARN profile upload failed for $A - keeping local copy and will exit non-zero to trigger retry; upload_failed=1; fi;
         if aws s3 cp sketches/$A.sylspr $S3/sketches/$A.sylspr.tmp --only-show-errors && aws s3 mv $S3/sketches/$A.sylspr.tmp $S3/sketches/$A.sylspr --only-show-errors; then rm -f sketches/$A.sylspr; else aws s3 rm $S3/sketches/$A.sylspr.tmp --quiet 2>/dev/null; echo WARN sketch upload failed for $A - keeping local copy and will exit non-zero to trigger retry; upload_failed=1; fi;
         else
         aws s3 cp logs/$A.log $S3/failures/$A.log --quiet || echo WARN failure-log upload failed for $A;
