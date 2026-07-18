@@ -44,7 +44,7 @@ ENV RUSTFLAGS="-C target-cpu=native -C strip=symbols"
 # wwood/weebill mirror) does NOT have `sketch --merge`, so pin the commit on the
 # add-merge-single-paired branch that does. (Mirrors sylph_build_from_source
 # .Dockerfile, which likewise builds from a wwood/sylph feature branch.)
-ENV WEEBILL_COMMIT f852ec5301625aac02a4719c8f9e7a10d3e8196c
+ENV WEEBILL_COMMIT=f852ec5301625aac02a4719c8f9e7a10d3e8196c
 RUN git clone https://github.com/wwood/sylph /tmp/weebill \
     && cd /tmp/weebill \
     && git checkout ${WEEBILL_COMMIT} \
@@ -59,7 +59,7 @@ RUN git clone https://github.com/wwood/sylph /tmp/weebill \
 # only the binary is copied into the runtime stage; the pixi env is discarded.
 RUN curl -fsSL https://pixi.sh/install.sh | bash
 ENV PATH="/root/.pixi/bin:${PATH}"
-ENV SRACAT_RS_COMMIT v0.2.0
+ENV SRACAT_RS_COMMIT=v0.2.0
 RUN git clone https://github.com/wwood/sracat-rs /tmp/sracat-rs \
     && cd /tmp/sracat-rs \
     && git checkout ${SRACAT_RS_COMMIT} \

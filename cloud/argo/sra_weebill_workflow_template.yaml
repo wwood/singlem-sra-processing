@@ -162,7 +162,7 @@ spec:
       # need via pread from these local copies.
       initContainers:
         - name: fetch-references
-          image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v4
+          image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v5
           volumeMounts:
             - name: ref-cache
               mountPath: /refcache
@@ -221,7 +221,7 @@ spec:
                 fetch "$SYL2DB_URI"; fetch "$REF_URI"
               fi
       container:
-        image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v4
+        image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v5
         volumeMounts:
           - name: ref-cache
             mountPath: /refcache
@@ -264,7 +264,7 @@ spec:
         mkfifo $A.pairs.fifo $A.singles.fifo;
         sracat-rs --eager-open-output --single-out $A.singles.fifo $A.sra > $A.pairs.fifo &
         sracat_pid=$!;
-        weebill sketch --tolerate-empty-inputs --merge --reference $REF --interleaved $A.pairs.fifo --reads $A.singles.fifo -S $A -d $A -t 4;
+        weebill sketch -c 100 --tolerate-empty-inputs --merge --reference $REF --interleaved $A.pairs.fifo --reads $A.singles.fifo -S $A -d $A -t 4;
         wait $sracat_pid;
         mv $A.sylspr sketches/$A.sylspr;
         weebill profile --two-stage --reference $REF $SYL2DB sketches/$A.sylspr -o $A.profile.tsv -t 4;
@@ -276,8 +276,9 @@ spec:
         if [ $status -ne 0 ]; then echo FAILED $A exit $status >> logs/$A.log; fi;
         aws s3 cp logs/$A.log $S3/logs/$A.log --quiet || echo WARN log upload failed for $A;
         if [ $status -eq 0 ]; then
-        if aws s3 cp profiles/$A.profile.tsv.gz $S3/profiles/$A.profile.tsv.gz.tmp --only-show-errors && aws s3 mv $S3/profiles/$A.profile.tsv.gz.tmp $S3/profiles/$A.profile.tsv.gz --only-show-errors; then rm -f profiles/$A.profile.tsv.gz; else aws s3 rm $S3/profiles/$A.profile.tsv.gz.tmp --quiet 2>/dev/null; echo WARN profile upload failed for $A - keeping local copy and will exit non-zero to trigger retry; upload_failed=1; fi;
+        if aws s3 cp profiles/$A.profile.tsv.gz $S3/profiles/$A.profile.tsv.gz.tmp --only-show-errors && aws s3 mv $S3/profiles/$A.profile.tsv.gz.tmp $S3/profiles/$A.profile.tsv.gz --only-show-errors; then rm -f profiles/$A.profile.tsv.gz;
         if aws s3 cp sketches/$A.sylspr $S3/sketches/$A.sylspr.tmp --only-show-errors && aws s3 mv $S3/sketches/$A.sylspr.tmp $S3/sketches/$A.sylspr --only-show-errors; then rm -f sketches/$A.sylspr; else aws s3 rm $S3/sketches/$A.sylspr.tmp --quiet 2>/dev/null; echo WARN sketch upload failed for $A - keeping local copy and will exit non-zero to trigger retry; upload_failed=1; fi;
+        else aws s3 rm $S3/profiles/$A.profile.tsv.gz.tmp --quiet 2>/dev/null; echo WARN profile upload failed for $A - NOT uploading sketch so the retry reprocesses instead of skipping; upload_failed=1; fi;
         else
         aws s3 cp logs/$A.log $S3/failures/$A.log --quiet || echo WARN failure-log upload failed for $A;
         fi;
@@ -288,7 +289,7 @@ spec:
         ]
         resources:
           requests:
-            memory: "4000Mi" # a minimum, I think
+            memory: "2800Mi" # Scheduling request only (no memory limit set, so pods still burst past it). ~2x the ~1.5GiB/pod average observed live; sized so CPU (1500m), not memory, stays the binding constraint on a c7a.12xlarge (96 GiB / 2800Mi ~= 34 >= 48vCPU / 1500m ~= 32 pods).
             cpu: "1500m" # Whole-run processing like the Logan workflow; sketching is CPU bound.
             # ephemeral-storage (the file-size scheduling constraint described
             # above) is set via podSpecPatch at the top of this template, not
