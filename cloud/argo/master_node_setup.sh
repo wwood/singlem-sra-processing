@@ -1,10 +1,14 @@
 #!/bin/bash -e
 
+
+
+sudo apt install jq -y
+
 ##### ARGO
 
 # Detect OS
 ARGO_OS="darwin"
-if [[ uname -s != "Darwin" ]]; then
+if [[ $(uname -s) != "Darwin" ]]; then
   ARGO_OS="linux"
 fi
 
@@ -94,11 +98,12 @@ subdomain            =
 role_arn             =
 http_attempts_count  =
 http_retry_delay     =
-region               = us-east-2
+region               = us-east-1
 EOF
 
-#### jq - already there? eh, just in case
-sudo apt install jq -y
+sudo apt install xvfb -y
+# xvfb-run saml2aws login --session-duration=28800
+
 
 
 #### pip and extern for slow_submit
@@ -111,3 +116,4 @@ pip install extern --break-system-packages
 
 sudo apt install parallel -y
 
+curl -fsSL https://pixi.sh/install.sh | sh

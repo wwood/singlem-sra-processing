@@ -289,7 +289,7 @@ spec:
         ]
         resources:
           requests:
-            memory: "2800Mi" # Scheduling request only (no memory limit set, so pods still burst past it). ~2x the ~1.5GiB/pod average observed live; sized so CPU (1500m), not memory, stays the binding constraint on a c7a.12xlarge (96 GiB / 2800Mi ~= 34 >= 48vCPU / 1500m ~= 32 pods).
+            memory: "3400Mi" # Scheduling request only (no memory limit set, so pods still burst past it). Bumped from 2800Mi to make MEMORY the binding constraint on the 96 GiB c7a.12xlarge fallback nodes, which were OOM-killing pods at ~32 pods/node (kernel OOM killer, no per-pod limit). c7a allocatable ~91.5 GiB / (3400 + 64Mi wait) ~= 26 pods/node - fewer pods, real RAM headroom. On m7a.12xlarge (192 GiB) CPU (1500m -> 31 pods) still binds first, so packing there is unchanged; only the cramped c7a nodes pack lighter.
             cpu: "1500m" # Whole-run processing like the Logan workflow; sketching is CPU bound.
             # ephemeral-storage (the file-size scheduling constraint described
             # above) is set via podSpecPatch at the top of this template, not
