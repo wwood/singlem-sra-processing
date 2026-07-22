@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Workflow
 metadata:
-  generateName: s2inglem-
+  generateName: s3inglem-
   # labels:
   #   workflows.argoproj.io/archive-strategy: "false"
   annotations:
@@ -162,7 +162,7 @@ spec:
       # need via pread from these local copies.
       initContainers:
         - name: fetch-references
-          image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v6
+          image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v7
           volumeMounts:
             - name: ref-cache
               mountPath: /refcache
@@ -221,7 +221,7 @@ spec:
                 fetch "$SYL2DB_URI"; fetch "$REF_URI"
               fi
       container:
-        image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v6
+        image: 656626576102.dkr.ecr.us-east-1.amazonaws.com/singlem/sracat_weebill:v7
         volumeMounts:
           - name: ref-cache
             mountPath: /refcache

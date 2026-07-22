@@ -79,6 +79,32 @@ RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tm
     && ./aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update \
     && rm -rf /tmp/awscliv2.zip /tmp/aws
 
+# NCBI SRA Toolkit `prefetch` (kingfisher `-m prefetch` download method) staged
+# into /opt/sratoolkit for copy into the runtime stage. Only the prefetch
+# driver-dispatch set is kept rather than the ~200 MB toolkit: modern sra-tools
+# ships `prefetch` as a symlink chain to `sratools` (a driver that inspects
+# argv[0] and execs the real `<tool>-orig` binary), so the minimal working set is
+#   sratools[.3][.<ver>]  - the argv[0] driver
+#   prefetch[.3][.<ver>]  - symlinks resolving to sratools
+#   prefetch-orig.<ver>   - the real prefetch binary the driver execs
+#   ncbi/*.kfg            - config (SDL resolver URLs, cert store) the tools load
+#                           relative to their own path; without it prefetch cannot
+#                           resolve accessions
+# cp -P preserves the symlinks (their targets are relative, so they stay valid).
+# Both sratools and prefetch-orig link only glibc, so they run as-is at runtime.
+ENV SRATOOLKIT_VERSION=3.4.1
+RUN curl -fsSL "https://ftp-trace.ncbi.nlm.nih.gov/sra/sdk/${SRATOOLKIT_VERSION}/sratoolkit.${SRATOOLKIT_VERSION}-ubuntu64.tar.gz" -o /tmp/sratoolkit.tar.gz \
+    && tar xzf /tmp/sratoolkit.tar.gz -C /tmp \
+    && SRC=/tmp/sratoolkit.${SRATOOLKIT_VERSION}-ubuntu64/bin \
+    && mkdir -p /opt/sratoolkit/bin/ncbi \
+    && cp -P "$SRC/sratools.${SRATOOLKIT_VERSION}" "$SRC/sratools.3" "$SRC/sratools" \
+             "$SRC/prefetch-orig.${SRATOOLKIT_VERSION}" \
+             "$SRC/prefetch.${SRATOOLKIT_VERSION}" "$SRC/prefetch.3" "$SRC/prefetch" \
+             /opt/sratoolkit/bin/ \
+    && cp "$SRC"/ncbi/*.kfg /opt/sratoolkit/bin/ncbi/ \
+    && /opt/sratoolkit/bin/prefetch --help > /dev/null \
+    && rm -rf /tmp/sratoolkit.tar.gz /tmp/sratoolkit.${SRATOOLKIT_VERSION}-ubuntu64
+
 # ---------------------------------------------------------------- runtime stage
 FROM ubuntu:24.04 AS runtime
 
@@ -134,6 +160,12 @@ COPY --from=builder /usr/local/bin/sracat-rs /usr/local/bin/sracat-rs
 COPY --from=builder /usr/local/aws-cli /usr/local/aws-cli
 RUN ln -s /usr/local/aws-cli/v2/current/bin/aws /usr/local/bin/aws
 
+# NCBI SRA Toolkit `prefetch` for kingfisher's `-m prefetch` download method. The
+# minimal driver-dispatch set staged in the builder (see there); put its bin on
+# PATH so kingfisher's plain `prefetch ...` invocation resolves it.
+COPY --from=builder /opt/sratoolkit /opt/sratoolkit
+ENV PATH="/opt/sratoolkit/bin:${PATH}"
+
 # ------------------------------------------------------------------ smoke tests
 # Exercise the exact download -> sracat-rs -> weebill FIFO pipeline used by the
 # workflow, so a broken image fails the build rather than the queue. This runs in
@@ -146,6 +178,12 @@ RUN weebill --help
 RUN weebill sketch --help | grep -q -- --merge
 RUN sracat-rs --help
 RUN aws --version
+# `prefetch` must dispatch through the driver and resolve/download an accession,
+# so kingfisher's `-m prefetch` method works. Exercises the staged sra-tools set
+# (driver symlink chain + prefetch-orig + ncbi/*.kfg) against NCBI end to end.
+RUN prefetch --help > /dev/null
+RUN cd /tmp && kingfisher get -r SRR8653040 -m prefetch -f sra --hide-download-progress \
+    && ls -lh /tmp/SRR8653040.sra && rm -f /tmp/SRR8653040.sra
 # The pipeline runs inside `bash -c` so that `&` backgrounds ONLY sracat-rs (the
 # single writer) while weebill reads both FIFOs in the foreground.
 RUN cd /tmp && kingfisher get -r SRR8653040 -m aws-http -f sra --guess-aws-location --hide-download-progress
