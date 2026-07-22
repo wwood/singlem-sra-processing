@@ -259,7 +259,7 @@ spec:
         if aws s3 ls $S3/sketches/$A.sylspr >/dev/null 2>&1; then echo skipping $A, already in S3; continue; fi;
         A=$A REF=$REF SYL2DB=$SYL2DB bash -e -o pipefail -c '
         echo processing $A on `date`;
-        kingfisher get -r $A --output-format-possibilities sra --guess-aws-location --hide-download-progress -m aws-http;
+        kingfisher get -r $A --output-format-possibilities sra --guess-aws-location --hide-download-progress -m aws-http prefetch;
         ls -lh $A.sra; free -h; df -h;
         mkfifo $A.pairs.fifo $A.singles.fifo;
         sracat-rs --eager-open-output --single-out $A.singles.fifo $A.sra > $A.pairs.fifo &

@@ -59,7 +59,7 @@ RUN git clone https://github.com/wwood/sylph /tmp/weebill \
 # only the binary is copied into the runtime stage; the pixi env is discarded.
 RUN curl -fsSL https://pixi.sh/install.sh | bash
 ENV PATH="/root/.pixi/bin:${PATH}"
-ENV SRACAT_RS_COMMIT=v0.2.0
+ENV SRACAT_RS_COMMIT=v0.2.1
 RUN git clone https://github.com/wwood/sracat-rs /tmp/sracat-rs \
     && cd /tmp/sracat-rs \
     && git checkout ${SRACAT_RS_COMMIT} \
@@ -83,8 +83,10 @@ RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tm
 FROM ubuntu:24.04 AS runtime
 
 # kingfisher (SRA/ENA downloader) and its runtime deps. kingfisher is installed
-# with --no-dependencies, so its imports (incl. pandas, imported at startup) must
-# be provided here explicitly, otherwise `kingfisher get` fails with ModuleNotFoundError.
+# from a pinned git commit (not pip) via GitHub's archive tarball, so no git is
+# needed. Like its pip-installed deps it is installed with --no-dependencies, so
+# its imports (incl. pandas, imported at startup) must be provided here
+# explicitly, otherwise `kingfisher get` fails with ModuleNotFoundError.
 # python3-pip is removed again after use; the packages it installs are pure python.
 #
 # NCBI VDB config (cloud location reporting) - harmless for local .sra reads,
@@ -102,7 +104,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         uuid-runtime \
     && apt-get install -y --no-install-recommends python3-pip \
     && pip install --no-cache-dir --no-dependencies --break-system-packages \
-        bird_tool_utils argparse-manpage-birdtools extern kingfisher \
+        bird_tool_utils argparse-manpage-birdtools extern \
+        https://github.com/wwood/kingfisher-download/archive/9e4571ef002b03a92b6d8b81a48e3228e07a1554.tar.gz \
     && apt-get purge -y python3-pip \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/* /root/.cache \
