@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+# wagtail-sra - profile SRA run accessions with the Wagtail amplicon pipeline.
+#
+# Per accession, the .sra file is the ONLY download:
+#   kingfisher get -f sra                             -> $A.sra
+#   sracat-rs --qual -1 fwd -2 /dev/null --single-out -> $A.fastq.gz
+# Wagtail has no paired-end mode - it uses the forward read only (see its
+# README, "Input") - so the reverse read of each pair is decoded straight to
+# /dev/null and only R1 (plus any single/orphan reads, which is everything for
+# an unpaired run) is written out, gzipped because QIIME2's manifest import
+# reads FastqGzFormat.
+#
+# Every accession is then processed in ONE Snakemake run rather than one run
+# each: Wagtail's marker_id step is batched over the whole sample list (it
+# builds the multi-GB minimap2 index once per batch, not once per sample), and
+# its SQLite execution log is per run. Wagtail soft-fails a sample rather than
+# aborting the run, so one bad accession does not take the batch with it; the
+# per-accession outcome is read back out of that SQLite log at the end.
+#
+# The reference databases are NOT in the image (they are far too big). They are
+# cached once per EC2 instance - exactly as the weebill workflow caches its
+# .sylref - and mounted read-only at $WAGTAIL_DB_CACHE (default /refcache).
+# Wagtail resolves databases by globbing its own database/ directory for
+# {marker}_database* / {marker}_taxonomy* / {marker}_deblur*, so the cached
+# files are symlinked in there first, stripping the "<16 hex>." prefix that the
+# node-local cache adds to keep same-named files from different s3:// URIs
+# apart (see the fetch-references initContainer in the Argo workflow).
+#
+# Usage:
+#   wagtail-sra [options] ACCESSION [ACCESSION ...]
+#
+# Options:
+#   --db-cache DIR    Node-local reference cache      (default $WAGTAIL_DB_CACHE or /refcache)
+#   --amplicon MARKER 16S|18S|ITS|CO1, or "auto" to    (default $WAGTAIL_AMPLICON or 16S)
+#                     let marker_id detect per sample.
+#                     "auto" needs ALL FOUR {marker}_database* files cached.
+#   --threads N       Cores for Snakemake and extraction (default: nproc)
+#   --outdir DIR      Where results are copied          (default: $PWD)
+#   --workdir DIR     Scratch for .sra/.fastq/.snakemake (default: $PWD/.wagtail-work)
+#   --run-name NAME   Wagtail run name                  (default: sra)
+#   --download-methods "M1 M2"   kingfisher -m methods  (default: "aws-http prefetch")
+#   --strict          Exit non-zero if ANY sample failed (default: report and exit 0,
+#                     so one bad accession in a batch does not fail the pod)
+#   --keep-scratch    Do not delete the .sra/.fastq scratch on success
+
+set -euo pipefail
+
+WAGTAIL_HOME=${WAGTAIL_HOME:-/opt/wagtail}
+CONDA_ENV_PREFIX=${SNAKEMAKE_CONDA_PREFIX:-/opt/wagtail-envs}
+DB_CACHE=${WAGTAIL_DB_CACHE:-/refcache}
+AMPLICON=${WAGTAIL_AMPLICON:-16S}
+THREADS=$(nproc)
+OUTDIR=$PWD
+WORKDIR=
+RUN_NAME=sra
+DOWNLOAD_METHODS="aws-http prefetch"
+STRICT=0
+KEEP_SCRATCH=0
+ACCESSIONS=()
+
+die() { echo "wagtail-sra: ERROR: $*" >&2; exit 1; }
+log() { echo "[wagtail-sra $(date -u +%H:%M:%S)] $*"; }
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --db-cache)         DB_CACHE=$2; shift 2 ;;
+        --amplicon)         AMPLICON=$2; shift 2 ;;
+        --threads|-t)       THREADS=$2; shift 2 ;;
+        --outdir|-o)        OUTDIR=$2; shift 2 ;;
+        --workdir)          WORKDIR=$2; shift 2 ;;
+        --run-name)         RUN_NAME=$2; shift 2 ;;
+        --download-methods) DOWNLOAD_METHODS=$2; shift 2 ;;
+        --strict)           STRICT=1; shift ;;
+        --keep-scratch)     KEEP_SCRATCH=1; shift ;;
+        -h|--help)          sed -n '2,50p' "$0"; exit 0 ;;
+        -*)                 die "unknown option $1" ;;
+        *)                  ACCESSIONS+=("$1"); shift ;;
+    esac
+done
+
+(( ${#ACCESSIONS[@]} > 0 )) || die "no accessions given (try --help)"
+# deblur rejects sample names containing underscores, and Wagtail's rules
+# constrain the sample wildcard to [^.]+ - run accessions satisfy both, but
+# check rather than fail deep inside the pipeline.
+for A in "${ACCESSIONS[@]}"; do
+    [[ $A =~ ^[A-Za-z0-9-]+$ ]] || die "accession '$A' contains characters Wagtail cannot use as a sample name (no dots or underscores)"
+done
+
+OUTDIR=$(mkdir -p "$OUTDIR" && cd "$OUTDIR" && pwd)
+WORKDIR=${WORKDIR:-$OUTDIR/.wagtail-work}
+mkdir -p "$WORKDIR"
+WORKDIR=$(cd "$WORKDIR" && pwd)
+
+# ── reference databases ───────────────────────────────────────────────────────
+# Symlink the node-local cache into Wagtail's database/ directory under the
+# names Wagtail globs for.
+link_databases() {
+    [[ -d $DB_CACHE ]] || die "reference cache $DB_CACHE does not exist - is the hostPath volume mounted?"
+    mkdir -p "$WAGTAIL_HOME/database"
+    # Drop links from an earlier invocation: a leftover 16S_database_A.fasta.gz
+    # alongside this run's 16S_database_B.fasta.gz is two matches for a pattern
+    # Wagtail requires to match exactly one.
+    find "$WAGTAIL_HOME/database" -maxdepth 1 -type l -delete
+
+    local f base linked=0
+    shopt -s nullglob
+    for f in "$DB_CACHE"/*; do
+        [[ -f $f ]] || continue
+        base=${f##*/}
+        # The cache's per-file flock and its in-progress downloads sit right
+        # next to the real files as "<name>.lock" / "<name>.tmp". Linking one in
+        # would give Wagtail two matches for a pattern that must match exactly
+        # one file, so drop them before anything else.
+        case $base in *.lock|*.tmp) continue ;; esac
+        # Cache entries are named "<sha256 head>.<original basename>"; Wagtail
+        # matches on the marker prefix, so the hash has to come off.
+        if [[ $base =~ ^[0-9a-f]{16}\.(.+)$ ]]; then base=${BASH_REMATCH[1]}; fi
+        # Only marker database files: skips any other tool's references (a
+        # weebill .sylref, say) sharing this cache.
+        [[ $base =~ ^(16S|18S|ITS|CO1)_(database|taxonomy|deblur) ]] || continue
+        ln -sfn "$f" "$WAGTAIL_HOME/database/$base"
+        linked=$((linked + 1))
+    done
+    shopt -u nullglob
+
+    (( linked > 0 )) || die "no {16S,18S,ITS,CO1}_{database,taxonomy,deblur}* files found in $DB_CACHE"
+    log "linked $linked reference file(s) from $DB_CACHE into $WAGTAIL_HOME/database"
+    ls -lL "$WAGTAIL_HOME/database"
+
+    # Wagtail's own check: each required pattern must match exactly one
+    # non-empty file (for a forced marker, only that marker is checked; 16S
+    # needs no deblur reference because q2-deblur denoise-16S has one built in).
+    local check_args=(--check-db)
+    if [[ $AMPLICON != auto ]]; then check_args+=(--amplicon "$AMPLICON"); fi
+    python "$WAGTAIL_HOME/wagtail.py" "${check_args[@]}" \
+        || die "database check failed - see above"
+}
+
+# ── download + extract ────────────────────────────────────────────────────────
+# Returns non-zero (without killing the batch) if the accession yields no reads.
+fetch_fastq() {
+    local A=$1 fq=$WORKDIR/fastq/$A.fastq.gz
+    local sra=$WORKDIR/$A.sra fwd=$WORKDIR/$A.fwd.fastq orphans=$WORKDIR/$A.orphans.fastq
+
+    mkdir -p "$WORKDIR/fastq"
+    ( cd "$WORKDIR" && kingfisher get -r "$A" \
+        --output-format-possibilities sra \
+        --guess-aws-location --hide-download-progress \
+        -m $DOWNLOAD_METHODS ) || { echo "download failed for $A" >&2; return 1; }
+    ls -lh "$sra"
+
+    # One pass over the .sra: forward reads to $fwd, mates discarded, orphan /
+    # unpaired reads (i.e. every read of an unpaired run) to $orphans. Neither
+    # output file is created when it would be empty, hence the -s tests below.
+    rm -f "$fwd" "$orphans"
+    sracat-rs --qual -t "$THREADS" \
+        -1 "$fwd" -2 /dev/null --single-out "$orphans" "$sra" \
+        || { echo "sracat-rs failed for $A" >&2; rm -f "$sra"; return 1; }
+
+    local parts=()
+    if [[ -s $fwd     ]]; then parts+=("$fwd"); fi
+    if [[ -s $orphans ]]; then parts+=("$orphans"); fi
+    if (( ${#parts[@]} == 0 )); then
+        echo "no reads extracted from $A" >&2
+        rm -f "$sra" "$fwd" "$orphans"
+        return 1
+    fi
+    cat "${parts[@]}" | pigz -p "$THREADS" -c > "$fq" \
+        || { echo "compression failed for $A" >&2; rm -f "$sra" "$fwd" "$orphans" "$fq"; return 1; }
+    rm -f "$sra" "$fwd" "$orphans"
+    ls -lh "$fq"
+    return 0
+}
+
+# ── run summary ───────────────────────────────────────────────────────────────
+# Wagtail records every (sample, rule) outcome as OK/FAILED in the merged
+# SQLite log, and exits 0 even when a sample soft-failed, so per-accession
+# status has to be read back out of that database.
+summarise() {
+    local sqlite=$1; shift
+    python - "$sqlite" "$@" <<'PY'
+import sqlite3, sys, os
+db, samples = sys.argv[1], sys.argv[2:]
+rows = []
+if os.path.exists(db):
+    con = sqlite3.connect(db)
+    try:
+        rows = con.execute("SELECT id, rule, outcome FROM logs ORDER BY rowid").fetchall()
+    except sqlite3.Error as e:                    # no logs table => nothing ran
+        print(f"could not read {db}: {e}", file=sys.stderr)
+    con.close()
+else:
+    print(f"no execution log at {db}", file=sys.stderr)
+
+failed, seen = {}, set()
+for sample, rule, outcome in rows:
+    seen.add(sample)
+    if outcome != "OK":
+        failed.setdefault(sample, rule)
+for s in samples:
+    if s not in seen:            # never logged at all: the run died before it
+        print(f"{s}\tFAILED\tno-log-entries")
+    else:
+        print(f"{s}\t{'FAILED' if s in failed else 'OK'}\t{failed.get(s, '')}")
+PY
+}
+
+# ── main ──────────────────────────────────────────────────────────────────────
+link_databases
+
+SAMPLES=()
+DOWNLOAD_FAILURES=()
+for A in "${ACCESSIONS[@]}"; do
+    log "fetching $A"
+    if fetch_fastq "$A"; then SAMPLES+=("$A"); else DOWNLOAD_FAILURES+=("$A"); fi
+done
+(( ${#SAMPLES[@]} > 0 )) || die "no accession could be downloaded and extracted"
+
+# Wagtail's inputs: one accession per line, plus accession -> absolute FASTQ path.
+: > "$WORKDIR/sample_list.txt"
+: > "$WORKDIR/file_map.tsv"
+for A in "${SAMPLES[@]}"; do
+    printf '%s\n'      "$A"                            >> "$WORKDIR/sample_list.txt"
+    printf '%s\t%s\n'  "$A" "$WORKDIR/fastq/$A.fastq.gz" >> "$WORKDIR/file_map.tsv"
+done
+# Named config.yaml, in the directory the run happens in, because wagtail.smk
+# carries a `configfile: "config.yaml"` directive that errors out when the file
+# is missing - whichever way Snakemake resolves that bare name (working
+# directory or Snakefile directory) a file is there, and --configfile wins.
+cat > "$WORKDIR/config.yaml" <<EOF
+run_name: "$RUN_NAME"
+sample_list: "$WORKDIR/sample_list.txt"
+file_map: "$WORKDIR/file_map.tsv"
+EOF
+
+WAGTAIL_ARGS=(--use-conda --conda-prefix "$CONDA_ENV_PREFIX"
+              --cores "$THREADS" --configfile "$WORKDIR/config.yaml")
+if [[ $AMPLICON != auto ]]; then
+    WAGTAIL_ARGS=(--amplicon "$AMPLICON" "${WAGTAIL_ARGS[@]}")
+fi
+
+log "running Wagtail over ${#SAMPLES[@]} sample(s): ${SAMPLES[*]}"
+# cd into the scratch so Snakemake's .snakemake/ (state + lock) lands there.
+# Outputs go to $WAGTAIL_HOME/run/$RUN_NAME regardless: Wagtail derives its run
+# directory from the checkout, not from the working directory.
+( cd "$WORKDIR" && python "$WAGTAIL_HOME/wagtail.py" "${WAGTAIL_ARGS[@]}" )
+
+# ── collect results ───────────────────────────────────────────────────────────
+RUN_OUT=$WAGTAIL_HOME/run/$RUN_NAME
+mkdir -p "$OUTDIR"/{condensed,metadata,logs}
+
+for A in "${SAMPLES[@]}"; do
+    cp -f "$RUN_OUT/6_condensed_wagtail/$A"_condensed.tsv "$OUTDIR/condensed/" 2>/dev/null || true
+    cp -f "$RUN_OUT/7_metadata/$A/$A"_metadata.tsv        "$OUTDIR/metadata/"  2>/dev/null || true
+    if [[ -d $RUN_OUT/0_logs_wagtail/$A ]]; then
+        cp -rf "$RUN_OUT/0_logs_wagtail/$A" "$OUTDIR/logs/"
+    fi
+done
+cp -f "$RUN_OUT/7_metadata/${RUN_NAME}_full_metadata.tsv" "$OUTDIR/metadata/" 2>/dev/null || true
+cp -f "$RUN_OUT/0_logs_wagtail/${RUN_NAME}_log.sql"       "$OUTDIR/logs/"     2>/dev/null || true
+
+STATUS_TSV=$OUTDIR/logs/${RUN_NAME}_status.tsv
+summarise "$RUN_OUT/0_logs_wagtail/${RUN_NAME}_log.sql" "${SAMPLES[@]}" > "$STATUS_TSV"
+for A in "${DOWNLOAD_FAILURES[@]}"; do
+    printf '%s\tFAILED\tdownload\n' "$A" >> "$STATUS_TSV"
+done
+
+echo
+log "per-accession outcome (accession / status / first failing rule):"
+cat "$STATUS_TSV"
+n_failed=$(grep -c $'\tFAILED\t' "$STATUS_TSV" || true)
+log "results in $OUTDIR (condensed/, metadata/, logs/); $n_failed of ${#ACCESSIONS[@]} accession(s) failed"
+
+(( KEEP_SCRATCH )) || rm -rf "$WORKDIR/fastq"
+
+if (( STRICT && n_failed > 0 )); then
+    die "$n_failed accession(s) failed and --strict was given"
+fi
+exit 0
